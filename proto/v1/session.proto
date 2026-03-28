@@ -1,0 +1,153 @@
+syntax = "proto3";
+package sentinel.v1;
+option go_package = "github.com/inovacc/sentinel/internal/api/v1;v1";
+
+// SessionService manages resumable sessions between Claude Code and remote devices.
+service SessionService {
+  // Create a new session on a device.
+  rpc Create(CreateSessionRequest) returns (CreateSessionResponse);
+  // Resume an interrupted or paused session.
+  rpc Resume(ResumeSessionRequest) returns (ResumeSessionResponse);
+  // Pause an active session, saving a checkpoint.
+  rpc Pause(PauseSessionRequest) returns (PauseSessionResponse);
+  // Get detailed status for a session.
+  rpc Status(SessionStatusRequest) returns (SessionStatusResponse);
+  // List sessions with optional filters.
+  rpc List(ListSessionsRequest) returns (ListSessionsResponse);
+  // Destroy a session and clean up resources.
+  rpc Destroy(DestroySessionRequest) returns (DestroySessionResponse);
+  // Create a manual checkpoint for the current session.
+  rpc Checkpoint(CheckpointRequest) returns (CheckpointResponse);
+  // Send a heartbeat to keep a session alive.
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+}
+
+// --- Session Messages ---
+
+message CreateSessionRequest {
+  string device_id = 1;
+  string project_name = 2;
+  string description = 3;
+  string working_dir = 4;
+  map<string, string> env = 5;
+}
+
+message CreateSessionResponse {
+  string session_id = 1;
+  string device_id = 2;
+  string sandbox_path = 3;
+}
+
+message ResumeSessionRequest {
+  string session_id = 1;
+}
+
+message ResumeSessionResponse {
+  string session_id = 1;
+  string status = 2;
+  SessionContext context = 3;
+  string error_info = 4;
+  SessionCheckpoint last_checkpoint = 5;
+  repeated SessionEvent recent_events = 6;
+}
+
+message PauseSessionRequest {
+  string session_id = 1;
+  string reason = 2;
+}
+
+message PauseSessionResponse {
+  bool success = 1;
+  string checkpoint_id = 2;
+}
+
+message SessionStatusRequest {
+  string session_id = 1;
+}
+
+message SessionStatusResponse {
+  string session_id = 1;
+  string device_id = 2;
+  string status = 3;
+  int64 created_at = 4;
+  int64 updated_at = 5;
+  int64 resumed_at = 6;
+  SessionContext context = 7;
+  string error_info = 8;
+  string metadata = 9;
+  int32 event_count = 10;
+  int32 checkpoint_count = 11;
+}
+
+message ListSessionsRequest {
+  string device_id = 1;
+  string status_filter = 2;
+  int32 limit = 3;
+}
+
+message ListSessionsResponse {
+  repeated SessionSummary sessions = 1;
+}
+
+message SessionSummary {
+  string session_id = 1;
+  string device_id = 2;
+  string status = 3;
+  string project_name = 4;
+  int64 created_at = 5;
+  int64 updated_at = 6;
+  string error_info = 7;
+  int32 event_count = 8;
+}
+
+message DestroySessionRequest {
+  string session_id = 1;
+}
+
+message DestroySessionResponse {
+  bool success = 1;
+}
+
+message CheckpointRequest {
+  string session_id = 1;
+  string description = 2;
+}
+
+message CheckpointResponse {
+  string checkpoint_id = 1;
+  int64 timestamp = 2;
+}
+
+message HeartbeatRequest {
+  string session_id = 1;
+}
+
+message HeartbeatResponse {
+  bool alive = 1;
+  string status = 2;
+}
+
+// --- Shared Session Types ---
+
+message SessionContext {
+  string working_dir = 1;
+  map<string, string> env = 2;
+  string last_command = 3;
+  string last_output = 4;
+  int32 last_exit_code = 5;
+  string project_name = 6;
+}
+
+message SessionCheckpoint {
+  string id = 1;
+  int64 timestamp = 2;
+  SessionContext state = 3;
+  string description = 4;
+}
+
+message SessionEvent {
+  int64 timestamp = 1;
+  string event_type = 2;
+  string summary = 3;
+  int32 sequence = 4;
+}

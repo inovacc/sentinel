@@ -1,0 +1,46 @@
+# Binaries
+sentinel
+sentinel.exe
+sentinel-eye
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test
+*.test
+*.out
+coverage*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build
+dist/
+build/
+
+# Scripts (ephemeral)
+.scripts/
+
+# Environment
+.env
+.env.*
+
+# Generated protobuf
+internal/api/v1/*.pb.go
+
+# SQLite databases (runtime)
+*.db
+*.db-journal
+*.db-wal
+
+# Sentinel data (runtime)
+.sentinel/

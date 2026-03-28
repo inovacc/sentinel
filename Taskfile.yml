@@ -1,0 +1,90 @@
+version: '3'
+
+vars:
+  BINARY: sentinel
+  MODULE: github.com/inovacc/sentinel
+  PROTO_DIR: proto/v1
+  GEN_DIR: internal/api/v1
+
+tasks:
+  default:
+    desc: Show available tasks
+    cmds:
+      - task --list
+
+  build:
+    desc: Build the sentinel binary
+    cmds:
+      - go build -o {{.BINARY}} .
+
+  run:
+    desc: Run sentinel
+    cmds:
+      - go run . {{.CLI_ARGS}}
+
+  test:
+    desc: Run all tests
+    cmds:
+      - go test ./... -race -count=1
+
+  test:coverage:
+    desc: Run tests with coverage
+    vars:
+      COVERAGE_FILE:
+        sh: echo "$TEMP/coverage_$(date +%Y%m%d_%H%M%S).out"
+    cmds:
+      - go test -coverprofile="{{.COVERAGE_FILE}}" -race ./...
+      - go tool cover -func="{{.COVERAGE_FILE}}"
+
+  lint:
+    desc: Run linter
+    cmds:
+      - golangci-lint run --fix ./... --timeout=5m
+
+  proto:
+    desc: Generate protobuf Go code
+    cmds:
+      - protoc --go_out=. --go_opt=paths=source_relative
+          --go-grpc_out=. --go-grpc_opt=paths=source_relative
+          {{.PROTO_DIR}}/*.proto
+
+  proto:install:
+    desc: Install protobuf tools
+    cmds:
+      - go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+      - go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+
+  clean:
+    desc: Clean build artifacts
+    cmds:
+      - rm -f {{.BINARY}} {{.BINARY}}.exe
+
+  fmt:
+    desc: Format Go code
+    cmds:
+      - gofmt -w -s .
+
+  vet:
+    desc: Run go vet
+    cmds:
+      - go vet ./...
+
+  tidy:
+    desc: Tidy go modules
+    cmds:
+      - go mod tidy
+
+  ca:init:
+    desc: Initialize the CA for development
+    cmds:
+      - go run . ca init
+
+  serve:
+    desc: Start the sentinel daemon
+    cmds:
+      - go run . serve
+
+  mcp:
+    desc: Start the MCP stdio server
+    cmds:
+      - go run . mcp

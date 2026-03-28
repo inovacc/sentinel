@@ -1,0 +1,130 @@
+syntax = "proto3";
+package sentinel.v1;
+option go_package = "github.com/inovacc/sentinel/internal/api/v1;v1";
+
+// FleetService handles device management and health monitoring.
+service FleetService {
+  // Register a device with the fleet controller.
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+  // List all known devices in the fleet.
+  rpc ListDevices(ListDevicesRequest) returns (ListDevicesResponse);
+  // Get detailed status for a specific device.
+  rpc DeviceStatus(DeviceStatusRequest) returns (DeviceStatusResponse);
+  // Health check for the local device.
+  rpc Health(HealthRequest) returns (HealthResponse);
+  // Accept or process a pairing request.
+  rpc AcceptPairing(PairingRequest) returns (PairingResponse);
+}
+
+// CaptureService handles screen capture operations.
+service CaptureService {
+  // Capture a screenshot of a display.
+  rpc Screenshot(ScreenshotRequest) returns (ScreenshotResponse);
+  // Capture a specific window by title.
+  rpc CaptureWindow(CaptureWindowRequest) returns (CaptureWindowResponse);
+  // List available displays/monitors.
+  rpc ListDisplays(ListDisplaysRequest) returns (ListDisplaysResponse);
+}
+
+// --- Fleet Messages ---
+
+message RegisterRequest {
+  string device_id = 1;
+  string hostname = 2;
+  string os = 3;
+  string arch = 4;
+  bytes certificate = 5;
+}
+
+message RegisterResponse {
+  bool accepted = 1;
+  string controller_device_id = 2;
+}
+
+message ListDevicesRequest {}
+
+message ListDevicesResponse {
+  repeated DeviceInfo devices = 1;
+}
+
+message DeviceInfo {
+  string device_id = 1;
+  string hostname = 2;
+  string os = 3;
+  string arch = 4;
+  string role = 5;
+  string status = 6;
+  int64 last_seen_unix = 7;
+  string address = 8;
+}
+
+message DeviceStatusRequest {
+  string device_id = 1;
+}
+
+message DeviceStatusResponse {
+  DeviceInfo device = 1;
+  double cpu_percent = 2;
+  double memory_percent = 3;
+  double disk_percent = 4;
+  int64 uptime_seconds = 5;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  string status = 1;
+  string version = 2;
+  string device_id = 3;
+  int64 uptime_seconds = 4;
+}
+
+message PairingRequest {
+  string device_id = 1;
+  string role = 2;
+  bytes certificate = 3;
+}
+
+message PairingResponse {
+  bool accepted = 1;
+  string assigned_role = 2;
+}
+
+// --- Capture Messages ---
+
+message ScreenshotRequest {
+  int32 display = 1;
+  int32 quality = 2;
+  double scale = 3;
+}
+
+message ScreenshotResponse {
+  bytes image = 1;
+  string format = 2;
+  int32 width = 3;
+  int32 height = 4;
+}
+
+message CaptureWindowRequest {
+  string window_title = 1;
+}
+
+message CaptureWindowResponse {
+  bytes image = 1;
+  string format = 2;
+  string matched_title = 3;
+}
+
+message ListDisplaysRequest {}
+
+message ListDisplaysResponse {
+  repeated DisplayInfo displays = 1;
+}
+
+message DisplayInfo {
+  int32 index = 1;
+  string name = 2;
+  int32 width = 3;
+  int32 height = 4;
+  bool primary = 5;
+}
