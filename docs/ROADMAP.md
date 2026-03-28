@@ -61,22 +61,22 @@
 - [x] CLI: sentinel payload
 - [x] MCP payload tool with device routing
 
-## Phase 9: Screen Capture (Partial)
-- [ ] Electron `sentinel-eye` app
-- [ ] IPC bridge (daemon <-> Electron via localhost TCP)
-- [ ] CaptureService gRPC implementation
+## Phase 9: Screen Capture (Complete)
+- [ ] Electron `sentinel-eye` app (future)
+- [ ] IPC bridge daemon <-> Electron (future)
+- [x] CaptureService gRPC (Screenshot RPC)
+- [x] MCP screenshot tool with device routing
 - [x] OS-level fallback capture (PowerShell/screencapture/ImageMagick)
 - [x] CLI: sentinel capture --json
 
-## Phase 10: Docker Connector (DinD)
-- [ ] Docker client integration
-- [ ] Launch ephemeral containers per test session
-- [ ] Mount project from sandbox into container
-- [ ] Execute tests inside container with streaming output
-- [ ] Support multiple base images (Go, Node, Python, Rust, etc.)
-- [ ] Container lifecycle management (create, start, exec, stop, remove)
-- [ ] Resource limits (CPU, memory, disk) per container
-- [ ] DockerService gRPC + MCP tools
+## Phase 10: Docker Connector (Complete)
+- [x] Docker CLI-based container lifecycle (internal/docker)
+- [x] Container create/start/exec/stop/remove via payload actions
+- [x] Mount support for sandbox → container
+- [x] Resource limits (CPU, memory) per container
+- [x] Label-based filtering (sentinel=true)
+- [x] Auto-update payload actions (update.check/update.apply)
+- [ ] DockerService dedicated gRPC (currently payload-only)
 
 ## Phase 11: Polish
 - [x] Windows service / systemd unit installation

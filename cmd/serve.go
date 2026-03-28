@@ -2,8 +2,10 @@ package cmd
 
 import (
 	"context"
+	"crypto/x509"
 	"database/sql"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"log/slog"
@@ -24,6 +26,7 @@ import (
 	"github.com/inovacc/sentinel/internal/fs"
 	sentinelgrpc "github.com/inovacc/sentinel/internal/grpc"
 	"github.com/inovacc/sentinel/internal/logrotate"
+	"github.com/inovacc/sentinel/internal/metrics"
 	"github.com/inovacc/sentinel/internal/payload"
 	"github.com/inovacc/sentinel/internal/rbac"
 	"github.com/inovacc/sentinel/internal/sandbox"
@@ -136,6 +139,20 @@ func runDaemon() error {
 
 	deviceID, _ := ca.DeviceID(certPEM)
 	logger.Info("device identity loaded", "device_id", deviceID)
+
+	// Check certificate expiry.
+	if block, _ := pem.Decode(certPEM); block != nil {
+		if cert, err := x509.ParseCertificate(block.Bytes); err == nil {
+			daysLeft := int(time.Until(cert.NotAfter).Hours() / 24)
+			if daysLeft <= 0 {
+				logger.Error("device certificate has EXPIRED", "expired", cert.NotAfter.Format("2006-01-02"))
+				_, _ = fmt.Fprintf(os.Stderr, "WARNING: Device certificate expired on %s! Run 'sentinel ca init' to renew.\n", cert.NotAfter.Format("2006-01-02"))
+			} else if daysLeft <= 30 {
+				logger.Warn("device certificate expires soon", "days_left", daysLeft, "expires", cert.NotAfter.Format("2006-01-02"))
+				_, _ = fmt.Fprintf(os.Stderr, "WARNING: Device certificate expires in %d days (%s)\n", daysLeft, cert.NotAfter.Format("2006-01-02"))
+			}
+		}
+	}
 
 	grpcAddr := cfg.Listen.GRPC
 	if grpcAddr == "" {
@@ -305,9 +322,14 @@ func runDaemon() error {
 	runner := exec.NewRunner(sb)
 	fsSvc := fs.NewService(sb)
 
-	// Create gRPC server with mTLS.
+	// Create rate limiter: 100 requests per second per client.
+	rl := sentinelgrpc.NewRateLimiter(100, time.Second)
+
+	// Create gRPC server with mTLS and rate limiting.
 	policy := rbac.NewPolicy()
-	grpcServer, err := sentinelgrpc.NewServer(certPEM, keyPEM, authority.RootCertPEM(), policy)
+	grpcServer, err := sentinelgrpc.NewServer(certPEM, keyPEM, authority.RootCertPEM(), policy,
+		sentinelgrpc.WithRateLimiter(rl),
+	)
 	if err != nil {
 		return fmt.Errorf("init gRPC server: %w", err)
 	}
@@ -327,6 +349,22 @@ func runDaemon() error {
 	healthMonitor := fleet.NewHealthMonitor(registry, certDir, logger, 60*time.Second)
 	go healthMonitor.Start(ctx)
 
+	// Start metrics HTTP server.
+	metricsAddr := cfg.Listen.Metrics
+	if metricsAddr == "" {
+		metricsAddr = ":7401"
+	}
+	metricsHandler := metrics.NewHandler(time.Now(), workerPool)
+	metricsMux := http.NewServeMux()
+	metricsMux.Handle("/metrics", metricsHandler)
+	metricsServer := &http.Server{Addr: metricsAddr, Handler: metricsMux}
+	go func() {
+		logger.Info("starting metrics server", "addr", metricsAddr)
+		if err := metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Error("metrics server failed", "error", err)
+		}
+	}()
+
 	logger.Info("starting gRPC server", "addr", grpcAddr)
 
 	// Start gRPC server on the mTLS port.
@@ -339,6 +377,9 @@ func runDaemon() error {
 	select {
 	case <-ctx.Done():
 		logger.Info("shutting down...")
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		_ = metricsServer.Shutdown(shutdownCtx)
 		grpcServer.Stop()
 		return nil
 	case err := <-errCh:

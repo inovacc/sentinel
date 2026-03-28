@@ -12,6 +12,11 @@ import (
 func newTestService(t *testing.T) (*Service, string) {
 	t.Helper()
 	root := t.TempDir()
+	// Resolve symlinks (macOS /var -> /private/var) so sandbox path checks pass.
+	root, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("eval symlinks: %v", err)
+	}
 	sb, err := sandbox.New(sandbox.Config{Root: root})
 	if err != nil {
 		t.Fatalf("create sandbox: %v", err)
