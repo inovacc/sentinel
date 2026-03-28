@@ -76,7 +76,13 @@ func runMCP(cmd *cobra.Command) error {
 		return fmt.Errorf("init session manager: %w", err)
 	}
 
+	// Resolve cert directory for remote device connections.
+	certDir, err := datadir.CertDir()
+	if err != nil {
+		return fmt.Errorf("cert dir: %w", err)
+	}
+
 	// Create and run MCP server.
-	server := sentinelmcp.NewServer(runner, fsSvc, sessionMgr)
+	server := sentinelmcp.NewServer(runner, fsSvc, sessionMgr, datadir.DBPath(), certDir)
 	return server.Run(cmd.Context())
 }

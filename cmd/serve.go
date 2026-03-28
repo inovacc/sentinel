@@ -281,7 +281,7 @@ func runDaemon() error {
 	}
 
 	// Register services.
-	grpcServer.RegisterExecService(sentinelgrpc.NewExecService(runner))
+	grpcServer.RegisterExecService(sentinelgrpc.NewExecService(runner, sessionMgr))
 	grpcServer.RegisterFileSystemService(sentinelgrpc.NewFileSystemService(fsSvc))
 	grpcServer.RegisterSessionService(sentinelgrpc.NewSessionService(sessionMgr))
 

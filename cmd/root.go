@@ -35,6 +35,7 @@ func init() {
 		newCaptureCmd(),
 		newCACmd(),
 		newMCPCmd(),
+		newDiscoverCmd(),
 		newVersionCmd(),
 	)
 }

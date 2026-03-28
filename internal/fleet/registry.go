@@ -211,10 +211,6 @@ func (r *Registry) Count(statusFilter DeviceStatus) (int, error) {
 	return count, err
 }
 
-type scanner interface {
-	Scan(dest ...any) error
-}
-
 func scanDevice(row *sql.Row) (*Device, error) {
 	d := &Device{}
 	var lastSeen, created int64
