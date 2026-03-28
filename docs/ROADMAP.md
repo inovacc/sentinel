@@ -9,29 +9,29 @@
 - [x] gRPC server with mTLS + RBAC interceptor
 - [x] Supervisor pattern (monitor/worker, signal handling, PID file, log rotation)
 
-## Phase 2: Core Sandbox + Exec
-- [ ] ExecService gRPC implementation (command execution with timeout + streaming)
-- [ ] FileSystemService implementation (read, write, list, glob, grep)
-- [ ] Platform-specific shell resolution (bash/cmd/powershell)
-- [ ] Wire `sentinel serve` command to start full daemon
+## Phase 2: Core Sandbox + Exec (Complete)
+- [x] ExecService gRPC implementation (command execution with timeout + streaming)
+- [x] FileSystemService implementation (read, write, list, glob, grep)
+- [x] Platform-specific shell resolution (bash/cmd/powershell)
+- [x] Wire `sentinel serve` command to start full daemon
 
-## Phase 3: Sessions
-- [ ] SessionService gRPC implementation
+## Phase 3: Sessions (Complete)
+- [x] SessionService gRPC implementation
 - [ ] Auto-checkpoint on exec and file write
 - [ ] Heartbeat monitoring goroutine
-- [ ] Session recovery on daemon startup
+- [x] Session recovery on daemon startup
 
-## Phase 4: Security + Pairing
-- [ ] `sentinel ca init` full implementation
+## Phase 4: Security + Pairing (Partial)
+- [x] `sentinel ca init` full implementation
 - [ ] Device pairing flow (discover, request, accept/reject)
 - [ ] mDNS LAN discovery
 - [ ] Trusted peers management (SQLite)
 
-## Phase 5: MCP Integration
-- [ ] MCP stdio server with go-sdk
-- [ ] Tool definitions mapping to gRPC services
+## Phase 5: MCP Integration (Complete)
+- [x] MCP stdio server with go-sdk (13 tools)
+- [x] Tool definitions mapping to gRPC services
 - [ ] Device routing (local vs remote via device_id)
-- [ ] Session tools for Claude Code
+- [x] Session tools for Claude Code
 
 ## Phase 6: Fleet + Upload
 - [ ] Fleet registry (SQLite)

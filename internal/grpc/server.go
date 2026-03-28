@@ -6,12 +6,10 @@ import (
 	"fmt"
 	"net"
 
+	v1 "github.com/inovacc/sentinel/internal/api/v1"
 	"github.com/inovacc/sentinel/internal/rbac"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
-
-	// TODO: uncomment once proto-generated code exists.
-	// v1 "github.com/inovacc/sentinel/internal/api/v1"
 )
 
 // Option configures the Server.
@@ -123,35 +121,29 @@ func (s *Server) Stop() {
 	s.grpcServer.GracefulStop()
 }
 
-// --- Service registration stubs ---
-// These will be uncommented once proto-generated code is available.
+// --- Service registration ---
 
 // RegisterExecService registers the ExecService implementation.
-// TODO: uncomment once proto-generated code exists.
-// func (s *Server) RegisterExecService(svc v1.ExecServiceServer) {
-// 	v1.RegisterExecServiceServer(s.grpcServer, svc)
-// }
+func (s *Server) RegisterExecService(svc v1.ExecServiceServer) {
+	v1.RegisterExecServiceServer(s.grpcServer, svc)
+}
 
 // RegisterFileSystemService registers the FileSystemService implementation.
-// TODO: uncomment once proto-generated code exists.
-// func (s *Server) RegisterFileSystemService(svc v1.FileSystemServiceServer) {
-// 	v1.RegisterFileSystemServiceServer(s.grpcServer, svc)
-// }
+func (s *Server) RegisterFileSystemService(svc v1.FileSystemServiceServer) {
+	v1.RegisterFileSystemServiceServer(s.grpcServer, svc)
+}
 
 // RegisterFleetService registers the FleetService implementation.
-// TODO: uncomment once proto-generated code exists.
-// func (s *Server) RegisterFleetService(svc v1.FleetServiceServer) {
-// 	v1.RegisterFleetServiceServer(s.grpcServer, svc)
-// }
+func (s *Server) RegisterFleetService(svc v1.FleetServiceServer) {
+	v1.RegisterFleetServiceServer(s.grpcServer, svc)
+}
 
 // RegisterCaptureService registers the CaptureService implementation.
-// TODO: uncomment once proto-generated code exists.
-// func (s *Server) RegisterCaptureService(svc v1.CaptureServiceServer) {
-// 	v1.RegisterCaptureServiceServer(s.grpcServer, svc)
-// }
+func (s *Server) RegisterCaptureService(svc v1.CaptureServiceServer) {
+	v1.RegisterCaptureServiceServer(s.grpcServer, svc)
+}
 
 // RegisterSessionService registers the SessionService implementation.
-// TODO: uncomment once proto-generated code exists.
-// func (s *Server) RegisterSessionService(svc v1.SessionServiceServer) {
-// 	v1.RegisterSessionServiceServer(s.grpcServer, svc)
-// }
+func (s *Server) RegisterSessionService(svc v1.SessionServiceServer) {
+	v1.RegisterSessionServiceServer(s.grpcServer, svc)
+}
