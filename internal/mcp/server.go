@@ -19,6 +19,7 @@ import (
 	"github.com/inovacc/sentinel/internal/fs"
 	"github.com/inovacc/sentinel/internal/payload"
 	"github.com/inovacc/sentinel/internal/session"
+	"github.com/inovacc/sentinel/internal/worker"
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -31,17 +32,19 @@ type Server struct {
 	fsSvc      *fs.Service
 	sessionMgr *session.Manager
 	payloadRegistry *payload.Registry
+	pool            *worker.Pool
 	dbPath          string // for fleet registry lookups
 	certDir         string // for loading mTLS certs
 }
 
 // NewServer creates an MCP server with all sentinel tools registered.
-func NewServer(runner *exec.Runner, fsSvc *fs.Service, sessionMgr *session.Manager, dbPath, certDir string) *Server {
+func NewServer(runner *exec.Runner, fsSvc *fs.Service, sessionMgr *session.Manager, pool *worker.Pool, dbPath, certDir string) *Server {
 	s := &Server{
 		runner:          runner,
 		fsSvc:           fsSvc,
 		sessionMgr:      sessionMgr,
 		payloadRegistry: payload.NewRegistry(),
+		pool:            pool,
 		dbPath:          dbPath,
 		certDir:         certDir,
 	}
@@ -133,6 +136,26 @@ func (s *Server) registerTools() {
 		Name:        "payload",
 		Description: "Send a structured JSON payload to a device and receive a JSON response",
 	}, s.handlePayload)
+
+	gomcp.AddTool(s.mcpServer, &gomcp.Tool{
+		Name:        "worker_spawn",
+		Description: "Spawn a background worker process on a device",
+	}, s.handleWorkerSpawn)
+
+	gomcp.AddTool(s.mcpServer, &gomcp.Tool{
+		Name:        "worker_list",
+		Description: "List workers on a device, optionally filtered by status",
+	}, s.handleWorkerList)
+
+	gomcp.AddTool(s.mcpServer, &gomcp.Tool{
+		Name:        "worker_get",
+		Description: "Get worker details including output",
+	}, s.handleWorkerGet)
+
+	gomcp.AddTool(s.mcpServer, &gomcp.Tool{
+		Name:        "worker_kill",
+		Description: "Kill a running worker on a device",
+	}, s.handleWorkerKill)
 }
 
 // --- Input types ---
@@ -715,4 +738,187 @@ func errResult(err error) *gomcp.CallToolResult {
 	r := &gomcp.CallToolResult{}
 	r.SetError(err)
 	return r
+}
+
+// --- Worker input types ---
+
+type WorkerSpawnInput struct {
+	DeviceID string   `json:"device_id,omitempty" jsonschema:"target device ID (empty = local)"`
+	Command  string   `json:"command" jsonschema:"command to execute"`
+	Args     []string `json:"args,omitempty" jsonschema:"command arguments"`
+	WorkDir  string   `json:"working_dir,omitempty" jsonschema:"working directory"`
+	Timeout  int      `json:"timeout,omitempty" jsonschema:"timeout in seconds (0 = no timeout)"`
+}
+
+type WorkerListInput struct {
+	DeviceID string `json:"device_id,omitempty" jsonschema:"target device ID (empty = local)"`
+	Status   string `json:"status,omitempty" jsonschema:"filter by status (running, completed, failed, killed)"`
+}
+
+type WorkerGetInput struct {
+	DeviceID string `json:"device_id,omitempty" jsonschema:"target device ID (empty = local)"`
+	WorkerID string `json:"worker_id" jsonschema:"ID of the worker"`
+}
+
+type WorkerKillInput struct {
+	DeviceID string `json:"device_id,omitempty" jsonschema:"target device ID (empty = local)"`
+	WorkerID string `json:"worker_id" jsonschema:"ID of the worker to kill"`
+}
+
+// --- Worker handlers ---
+
+func (s *Server) handleWorkerSpawn(_ context.Context, _ *gomcp.CallToolRequest, input WorkerSpawnInput) (*gomcp.CallToolResult, any, error) {
+	if !isLocal(input.DeviceID) {
+		return s.remoteWorkerSpawn(input)
+	}
+
+	if s.pool == nil {
+		return errResult(fmt.Errorf("worker pool not available")), nil, nil
+	}
+
+	timeout := time.Duration(0)
+	if input.Timeout > 0 {
+		timeout = time.Duration(input.Timeout) * time.Second
+	}
+
+	ctx := context.Background()
+	w, err := s.pool.Spawn(ctx, input.Command, input.Args, input.WorkDir, nil, "", nil, timeout)
+	if err != nil {
+		return errResult(err), nil, nil
+	}
+
+	data, _ := json.MarshalIndent(w, "", "  ")
+	return txtResult(string(data)), nil, nil
+}
+
+func (s *Server) handleWorkerList(_ context.Context, _ *gomcp.CallToolRequest, input WorkerListInput) (*gomcp.CallToolResult, any, error) {
+	if !isLocal(input.DeviceID) {
+		return s.remoteWorkerList(input)
+	}
+
+	if s.pool == nil {
+		return errResult(fmt.Errorf("worker pool not available")), nil, nil
+	}
+
+	workers, err := s.pool.List(worker.Status(input.Status))
+	if err != nil {
+		return errResult(err), nil, nil
+	}
+
+	data, _ := json.MarshalIndent(workers, "", "  ")
+	return txtResult(string(data)), nil, nil
+}
+
+func (s *Server) handleWorkerGet(_ context.Context, _ *gomcp.CallToolRequest, input WorkerGetInput) (*gomcp.CallToolResult, any, error) {
+	if !isLocal(input.DeviceID) {
+		return s.remoteWorkerGet(input)
+	}
+
+	if s.pool == nil {
+		return errResult(fmt.Errorf("worker pool not available")), nil, nil
+	}
+
+	w, err := s.pool.Get(input.WorkerID)
+	if err != nil {
+		return errResult(err), nil, nil
+	}
+
+	data, _ := json.MarshalIndent(w, "", "  ")
+	return txtResult(string(data)), nil, nil
+}
+
+func (s *Server) handleWorkerKill(_ context.Context, _ *gomcp.CallToolRequest, input WorkerKillInput) (*gomcp.CallToolResult, any, error) {
+	if !isLocal(input.DeviceID) {
+		return s.remoteWorkerKill(input)
+	}
+
+	if s.pool == nil {
+		return errResult(fmt.Errorf("worker pool not available")), nil, nil
+	}
+
+	if err := s.pool.Kill(input.WorkerID); err != nil {
+		return errResult(err), nil, nil
+	}
+
+	return txtResult(fmt.Sprintf("Worker %s killed", input.WorkerID)), nil, nil
+}
+
+// --- Remote worker helpers ---
+
+func (s *Server) remoteWorkerSpawn(input WorkerSpawnInput) (*gomcp.CallToolResult, any, error) {
+	conn, err := s.dialDevice(input.DeviceID)
+	if err != nil {
+		return errResult(err), nil, nil
+	}
+	defer func() { _ = conn.Close() }()
+
+	client := v1.NewWorkerServiceClient(conn)
+	resp, err := client.Spawn(context.Background(), &v1.SpawnWorkerRequest{
+		Command:        input.Command,
+		Args:           input.Args,
+		WorkingDir:     input.WorkDir,
+		TimeoutSeconds: int32(input.Timeout),
+	})
+	if err != nil {
+		return errResult(fmt.Errorf("remote worker_spawn on %q: %w", input.DeviceID, err)), nil, nil
+	}
+
+	data, _ := json.MarshalIndent(resp, "", "  ")
+	return txtResult(string(data)), nil, nil
+}
+
+func (s *Server) remoteWorkerList(input WorkerListInput) (*gomcp.CallToolResult, any, error) {
+	conn, err := s.dialDevice(input.DeviceID)
+	if err != nil {
+		return errResult(err), nil, nil
+	}
+	defer func() { _ = conn.Close() }()
+
+	client := v1.NewWorkerServiceClient(conn)
+	resp, err := client.List(context.Background(), &v1.ListWorkersRequest{
+		StatusFilter: input.Status,
+	})
+	if err != nil {
+		return errResult(fmt.Errorf("remote worker_list on %q: %w", input.DeviceID, err)), nil, nil
+	}
+
+	data, _ := json.MarshalIndent(resp, "", "  ")
+	return txtResult(string(data)), nil, nil
+}
+
+func (s *Server) remoteWorkerGet(input WorkerGetInput) (*gomcp.CallToolResult, any, error) {
+	conn, err := s.dialDevice(input.DeviceID)
+	if err != nil {
+		return errResult(err), nil, nil
+	}
+	defer func() { _ = conn.Close() }()
+
+	client := v1.NewWorkerServiceClient(conn)
+	resp, err := client.Get(context.Background(), &v1.GetWorkerRequest{
+		WorkerId: input.WorkerID,
+	})
+	if err != nil {
+		return errResult(fmt.Errorf("remote worker_get on %q: %w", input.DeviceID, err)), nil, nil
+	}
+
+	data, _ := json.MarshalIndent(resp, "", "  ")
+	return txtResult(string(data)), nil, nil
+}
+
+func (s *Server) remoteWorkerKill(input WorkerKillInput) (*gomcp.CallToolResult, any, error) {
+	conn, err := s.dialDevice(input.DeviceID)
+	if err != nil {
+		return errResult(err), nil, nil
+	}
+	defer func() { _ = conn.Close() }()
+
+	client := v1.NewWorkerServiceClient(conn)
+	_, err = client.Kill(context.Background(), &v1.KillWorkerRequest{
+		WorkerId: input.WorkerID,
+	})
+	if err != nil {
+		return errResult(fmt.Errorf("remote worker_kill on %q: %w", input.DeviceID, err)), nil, nil
+	}
+
+	return txtResult(fmt.Sprintf("Worker %s killed on device %s", input.WorkerID, input.DeviceID)), nil, nil
 }

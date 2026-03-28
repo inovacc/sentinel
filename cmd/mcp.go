@@ -11,6 +11,7 @@ import (
 	"github.com/inovacc/sentinel/internal/sandbox"
 	"github.com/inovacc/sentinel/internal/session"
 	"github.com/inovacc/sentinel/internal/settings"
+	"github.com/inovacc/sentinel/internal/worker"
 	"github.com/spf13/cobra"
 
 	_ "modernc.org/sqlite"
@@ -76,6 +77,13 @@ func runMCP(cmd *cobra.Command) error {
 		return fmt.Errorf("init session manager: %w", err)
 	}
 
+	// Initialize worker pool.
+	workerPool, err := worker.NewPool(db, sb)
+	if err != nil {
+		return fmt.Errorf("init worker pool: %w", err)
+	}
+	defer workerPool.Stop()
+
 	// Resolve cert directory for remote device connections.
 	certDir, err := datadir.CertDir()
 	if err != nil {
@@ -83,6 +91,6 @@ func runMCP(cmd *cobra.Command) error {
 	}
 
 	// Create and run MCP server.
-	server := sentinelmcp.NewServer(runner, fsSvc, sessionMgr, datadir.DBPath(), certDir)
+	server := sentinelmcp.NewServer(runner, fsSvc, sessionMgr, workerPool, datadir.DBPath(), certDir)
 	return server.Run(cmd.Context())
 }

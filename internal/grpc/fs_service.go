@@ -7,6 +7,7 @@ import (
 
 	v1 "github.com/inovacc/sentinel/internal/api/v1"
 	"github.com/inovacc/sentinel/internal/fs"
+	"github.com/inovacc/sentinel/internal/session"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -17,12 +18,13 @@ const downloadChunkSize = 32 * 1024 // 32KB
 // FileSystemServiceImpl implements the FileSystemService gRPC service.
 type FileSystemServiceImpl struct {
 	v1.UnimplementedFileSystemServiceServer
-	fs *fs.Service
+	fs         *fs.Service
+	sessionMgr *session.Manager // optional, for auto-checkpoint on write
 }
 
 // NewFileSystemService creates a new FileSystemServiceImpl.
-func NewFileSystemService(fsSvc *fs.Service) *FileSystemServiceImpl {
-	return &FileSystemServiceImpl{fs: fsSvc}
+func NewFileSystemService(fsSvc *fs.Service, sessionMgr *session.Manager) *FileSystemServiceImpl {
+	return &FileSystemServiceImpl{fs: fsSvc, sessionMgr: sessionMgr}
 }
 
 // ReadFile reads a file within sandbox-allowed paths.

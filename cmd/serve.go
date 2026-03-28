@@ -59,6 +59,10 @@ func runDaemon() error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("invalid config: %w", err)
+	}
+
 	// Set up logging.
 	logPath := cfg.Logging.File
 	if logPath == "" {
@@ -187,6 +191,22 @@ func runDaemon() error {
 		logger.Info("recovered interrupted sessions", "count", recovered)
 	}
 
+	// Start heartbeat monitoring goroutine.
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if n, err := sessionMgr.CheckStale(ctx, 30*time.Second); err == nil && n > 0 {
+					logger.Info("marked stale sessions", "count", n)
+				}
+			}
+		}
+	}()
+
 	// Initialize worker pool.
 	workerPool, err := worker.NewPool(db, sb, worker.WithLogger(logger))
 	if err != nil {
@@ -297,10 +317,14 @@ func runDaemon() error {
 
 	// Register services.
 	grpcServer.RegisterExecService(sentinelgrpc.NewExecService(runner, sessionMgr))
-	grpcServer.RegisterFileSystemService(sentinelgrpc.NewFileSystemService(fsSvc))
+	grpcServer.RegisterFileSystemService(sentinelgrpc.NewFileSystemService(fsSvc, sessionMgr))
 	grpcServer.RegisterSessionService(sentinelgrpc.NewSessionService(sessionMgr))
 	grpcServer.RegisterPayloadService(sentinelgrpc.NewPayloadService(payloadRegistry))
 	grpcServer.RegisterWorkerService(sentinelgrpc.NewWorkerService(workerPool))
+
+	// Start fleet health monitor.
+	healthMonitor := fleet.NewHealthMonitor(registry, certDir, logger, 60*time.Second)
+	go healthMonitor.Start(ctx)
 
 	logger.Info("starting gRPC server", "addr", grpcAddr)
 

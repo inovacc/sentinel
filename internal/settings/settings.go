@@ -2,6 +2,7 @@ package settings
 
 import (
 	"fmt"
+	"net"
 	"os"
 
 	"gopkg.in/yaml.v3"
@@ -114,6 +115,31 @@ func DefaultConfig() *Config {
 			MaxFiles:  5,
 		},
 	}
+}
+
+// Validate checks the config for invalid values.
+func (c *Config) Validate() error {
+	// Check listen addresses are valid.
+	if c.Listen.GRPC != "" {
+		if _, _, err := net.SplitHostPort(c.Listen.GRPC); err != nil {
+			return fmt.Errorf("invalid grpc listen address %q: %w", c.Listen.GRPC, err)
+		}
+	}
+	// Check sandbox max size is reasonable.
+	if c.Sandbox.MaxSizeGB < 0 {
+		return fmt.Errorf("sandbox max_size_gb must be >= 0")
+	}
+	// Check log level is valid.
+	switch c.Logging.Level {
+	case "debug", "info", "warn", "error", "":
+	default:
+		return fmt.Errorf("invalid log level %q", c.Logging.Level)
+	}
+	// Check session heartbeat interval.
+	if c.Session.HeartbeatInterval < 0 {
+		return fmt.Errorf("session heartbeat_interval must be >= 0")
+	}
+	return nil
 }
 
 // Load reads config from a YAML file, merging with defaults.
