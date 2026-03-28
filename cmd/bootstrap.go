@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/inovacc/sentinel/internal/ca"
 	"github.com/inovacc/sentinel/internal/datadir"
+	"github.com/inovacc/sentinel/internal/fleet"
 	"github.com/inovacc/sentinel/pkg/transport"
 	"github.com/spf13/cobra"
 )
@@ -245,6 +247,32 @@ func runBootstrapConnect(addr, role string) error {
 		}
 	}
 
+	// Register the server in the local fleet registry.
+	reg, cleanup, err := openRegistry()
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "warning: failed to open registry: %v\n", err)
+	} else {
+		defer cleanup()
+		// Build mTLS address from bootstrap addr host + mTLS port.
+		mtlsAddr := buildMTLSAddr(addr, result.MTLSAddr)
+		peerDevice := &fleet.Device{
+			DeviceID: result.PeerDeviceID,
+			Address:  mtlsAddr,
+			Role:     "admin", // The server that signed our cert is the authority.
+			Status:   fleet.StatusOnline,
+		}
+		if err := reg.AddPending(peerDevice); err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "warning: failed to register peer: %v\n", err)
+		} else {
+			// Auto-accept the server since we just bootstrapped with it.
+			if err := reg.Accept(result.PeerDeviceID, "admin"); err != nil {
+				_, _ = fmt.Fprintf(os.Stderr, "warning: failed to accept peer: %v\n", err)
+			} else {
+				_, _ = fmt.Fprintf(os.Stderr, "Registered peer %s in fleet registry\n", result.PeerDeviceID)
+			}
+		}
+	}
+
 	// Print result.
 	newDeviceID := "(none)"
 	if len(result.SignedCertPEM) > 0 {
@@ -268,4 +296,19 @@ func runBootstrapConnect(addr, role string) error {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(output)
+}
+
+// buildMTLSAddr takes the bootstrap address (e.g., "192.168.1.100:7399")
+// and the mTLS addr from the server (e.g., ":7400") and builds a full
+// mTLS address (e.g., "192.168.1.100:7400").
+func buildMTLSAddr(bootstrapAddr, mtlsAddr string) string {
+	host, _, err := net.SplitHostPort(bootstrapAddr)
+	if err != nil {
+		return bootstrapAddr
+	}
+	_, port, err := net.SplitHostPort(mtlsAddr)
+	if err != nil {
+		port = "7400"
+	}
+	return net.JoinHostPort(host, port)
 }

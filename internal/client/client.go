@@ -40,9 +40,25 @@ func Connect(addr string, certPEM, keyPEM, caCertPEM []byte) (*Client, error) {
 	}
 
 	tlsCfg := &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		RootCAs:      caPool,
-		MinVersion:   tls.VersionTLS13,
+		Certificates:       []tls.Certificate{cert},
+		RootCAs:            caPool,
+		MinVersion:         tls.VersionTLS13,
+		InsecureSkipVerify: true, // Skip hostname/IP SAN check.
+		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+			// Manually verify the peer cert is signed by our CA.
+			if len(rawCerts) == 0 {
+				return fmt.Errorf("client: no peer certificate")
+			}
+			peerCert, err := x509.ParseCertificate(rawCerts[0])
+			if err != nil {
+				return fmt.Errorf("client: parse peer cert: %w", err)
+			}
+			_, err = peerCert.Verify(x509.VerifyOptions{Roots: caPool})
+			if err != nil {
+				return fmt.Errorf("client: peer cert not signed by CA: %w", err)
+			}
+			return nil
+		},
 	}
 
 	conn, err := grpc.NewClient(addr,
