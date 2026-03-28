@@ -249,37 +249,25 @@ func runDaemon() error {
 		return fmt.Errorf("init transport: %w", err)
 	}
 
-	// Start transport (bootstrap or mTLS depending on state).
-	if err := transportMgr.Start(ctx); err != nil {
-		return fmt.Errorf("start transport: %w", err)
-	}
-	defer transportMgr.Stop()
-
-	// If we're in bootstrap phase, also start the bootstrap server handler.
-	if transportMgr.Phase() == transport.PhaseBootstrap {
+	// Start bootstrap listener for device pairing (regardless of mTLS state).
+	// The gRPC server handles mTLS on :7400 separately.
+	if err := transportMgr.StartBootstrapOnly(ctx); err != nil {
+		logger.Warn("could not start bootstrap port", "error", err)
+	} else {
+		defer transportMgr.Stop()
 		bs := transport.NewBootstrapServer(transportMgr, version)
 		go func() {
 			_ = bs.Serve(ctx)
 		}()
-		logger.Info("bootstrap server started", "addr", bootstrapAddr)
-	}
-
-	// If we have mTLS (either detected or after bootstrap), also open bootstrap for pairing.
-	if transportMgr.Phase() == transport.PhaseMTLS {
-		// Re-enable bootstrap port alongside mTLS for accepting new peers.
-		if err := transportMgr.EnableRenewal(ctx); err != nil {
-			logger.Warn("could not open bootstrap port for pairing", "error", err)
-		} else {
-			bs := transport.NewBootstrapServer(transportMgr, version)
-			go func() {
-				_ = bs.Serve(ctx)
-			}()
-			logger.Info("bootstrap server started for pairing", "addr", bootstrapAddr)
-		}
+		logger.Info("bootstrap server started for pairing", "addr", bootstrapAddr)
 	}
 
 	// Print startup info.
-	printStartupBanner(deviceID, grpcAddr, bootstrapAddr, transportMgr.Phase().String())
+	phase := "mtls"
+	if transportMgr.BootstrapListener() != nil {
+		phase = "mtls+bootstrap"
+	}
+	printStartupBanner(deviceID, grpcAddr, bootstrapAddr, phase)
 
 	// Create services.
 	runner := exec.NewRunner(sb)
@@ -299,7 +287,7 @@ func runDaemon() error {
 
 	logger.Info("starting gRPC server", "addr", grpcAddr)
 
-	// Start gRPC server.
+	// Start gRPC server on the mTLS port.
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- grpcServer.Serve(grpcAddr)

@@ -197,6 +197,12 @@ func (m *Manager) Start(ctx context.Context) error {
 	}
 }
 
+// StartBootstrapOnly opens just the bootstrap listener for device pairing,
+// without touching the mTLS port (which is managed by the gRPC server).
+func (m *Manager) StartBootstrapOnly(ctx context.Context) error {
+	return m.startBootstrap(ctx)
+}
+
 // Stop gracefully shuts down all listeners.
 func (m *Manager) Stop() {
 	if m.cancel != nil {

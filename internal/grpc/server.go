@@ -116,6 +116,12 @@ func (s *Server) Serve(addr string) error {
 	return s.grpcServer.Serve(lis)
 }
 
+// ServeListener starts the gRPC server on an existing listener.
+func (s *Server) ServeListener(lis net.Listener) error {
+	s.listener = lis
+	return s.grpcServer.Serve(lis)
+}
+
 // Stop gracefully stops the gRPC server.
 func (s *Server) Stop() {
 	s.grpcServer.GracefulStop()
