@@ -15,7 +15,10 @@ Secure remote REPL daemon for [Claude Code](https://claude.com/claude-code). Let
 ## Quick Start
 
 ```bash
-# Build
+# Install
+go install github.com/inovacc/sentinel@latest
+
+# Or build from source
 go build -o sentinel .
 
 # Initialize CA and device identity
