@@ -31,6 +31,7 @@ func init() {
 		newPairCmd(),
 		newFleetCmd(),
 		newExecCmd(),
+		newLsCmd(),
 		newUploadCmd(),
 		newCaptureCmd(),
 		newCACmd(),
