@@ -282,20 +282,22 @@ func (m *Manager) EnableRenewal(ctx context.Context) error {
 		return fmt.Errorf("transport: start renewal bootstrap: %w", err)
 	}
 
-	// Auto-close bootstrap after timeout.
-	go func() {
-		timer := time.NewTimer(m.cfg.BootstrapTimeout)
-		defer timer.Stop()
-		select {
-		case <-timer.C:
-			m.logger.Warn("transport: renewal timeout, closing bootstrap port")
-			m.closeBootstrap()
-			m.mu.Lock()
-			m.phase = PhaseMTLS
-			m.mu.Unlock()
-		case <-ctx.Done():
-		}
-	}()
+	// Auto-close bootstrap after timeout (0 = keep open until context cancelled).
+	if m.cfg.BootstrapTimeout > 0 {
+		go func() {
+			timer := time.NewTimer(m.cfg.BootstrapTimeout)
+			defer timer.Stop()
+			select {
+			case <-timer.C:
+				m.logger.Warn("transport: renewal timeout, closing bootstrap port")
+				m.closeBootstrap()
+				m.mu.Lock()
+				m.phase = PhaseMTLS
+				m.mu.Unlock()
+			case <-ctx.Done():
+			}
+		}()
+	}
 
 	return nil
 }
@@ -371,7 +373,8 @@ func (m *Manager) startBootstrap(ctx context.Context) error {
 		"device_id", m.deviceID)
 
 	// Auto-close bootstrap after timeout (only in bootstrap phase, not renewal).
-	if m.Phase() == PhaseBootstrap {
+	// Timeout of 0 means keep open until context cancelled.
+	if m.Phase() == PhaseBootstrap && m.cfg.BootstrapTimeout > 0 {
 		go func() {
 			timer := time.NewTimer(m.cfg.BootstrapTimeout)
 			defer timer.Stop()

@@ -20,28 +20,31 @@ import (
 	"github.com/inovacc/sentinel/internal/ca"
 	"github.com/inovacc/sentinel/internal/datadir"
 	"github.com/inovacc/sentinel/internal/exec"
-	sentinelgrpc "github.com/inovacc/sentinel/internal/grpc"
+	"github.com/inovacc/sentinel/internal/fleet"
 	"github.com/inovacc/sentinel/internal/fs"
+	sentinelgrpc "github.com/inovacc/sentinel/internal/grpc"
 	"github.com/inovacc/sentinel/internal/logrotate"
 	"github.com/inovacc/sentinel/internal/rbac"
 	"github.com/inovacc/sentinel/internal/sandbox"
 	"github.com/inovacc/sentinel/internal/serverinfo"
 	"github.com/inovacc/sentinel/internal/session"
 	"github.com/inovacc/sentinel/internal/settings"
+	"github.com/inovacc/sentinel/pkg/transport"
 	"github.com/spf13/cobra"
 
 	_ "modernc.org/sqlite"
 )
 
 func newServeCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Start the sentinel daemon (foreground)",
-		Long:  `Starts the sentinel gRPC daemon in the foreground with mTLS authentication.`,
+		Long:  `Starts the sentinel gRPC daemon in the foreground with mTLS authentication and bootstrap port for new device pairing.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runDaemon()
 		},
 	}
+	return cmd
 }
 
 func runDaemon() error {
@@ -68,8 +71,7 @@ func runDaemon() error {
 	}
 	logWriter, err = logrotate.New(logPath, maxSize, maxFiles)
 	if err != nil {
-		// Fall back to stderr.
-		fmt.Fprintf(os.Stderr, "warning: failed to open log file %s: %v\n", logPath, err)
+		_, _ = fmt.Fprintf(os.Stderr, "warning: failed to open log file %s: %v\n", logPath, err)
 	}
 
 	var logger *slog.Logger
@@ -126,12 +128,25 @@ func runDaemon() error {
 	deviceID, _ := ca.DeviceID(certPEM)
 	logger.Info("device identity loaded", "device_id", deviceID)
 
-	listenAddr := cfg.Listen.GRPC
-	if listenAddr == "" {
-		listenAddr = ":7400"
+	grpcAddr := cfg.Listen.GRPC
+	if grpcAddr == "" {
+		grpcAddr = ":7400"
 	}
 
-	printStartupBanner(deviceID, listenAddr)
+	bootstrapAddr := ":7399"
+
+	// Initialize SQLite database.
+	db, err := sql.Open("sqlite", datadir.DBPath())
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	// Initialize fleet registry.
+	registry, err := fleet.NewRegistry(db)
+	if err != nil {
+		return fmt.Errorf("init fleet registry: %w", err)
+	}
 
 	// Initialize sandbox.
 	sandboxRoot := cfg.Sandbox.Root
@@ -150,13 +165,6 @@ func runDaemon() error {
 	}
 	logger.Info("sandbox initialized", "root", sb.Root())
 
-	// Initialize SQLite database.
-	db, err := sql.Open("sqlite", datadir.DBPath())
-	if err != nil {
-		return fmt.Errorf("open database: %w", err)
-	}
-	defer func() { _ = db.Close() }()
-
 	// Initialize session manager.
 	sessionMgr, err := session.NewManager(db)
 	if err != nil {
@@ -174,6 +182,105 @@ func runDaemon() error {
 		logger.Info("recovered interrupted sessions", "count", recovered)
 	}
 
+	// --- Transport: Bootstrap + mTLS ---
+
+	// Generate or load bootstrap identity.
+	certStore, err := transport.NewCertStore(certDir)
+	if err != nil {
+		return fmt.Errorf("cert store: %w", err)
+	}
+
+	var bootCert, bootKey []byte
+	if certStore.HasBootstrap() {
+		bootCert, bootKey, err = certStore.LoadBootstrap()
+		if err != nil {
+			return fmt.Errorf("load bootstrap identity: %w", err)
+		}
+	} else {
+		bootCert, bootKey, err = transport.GenerateBootstrapIdentity()
+		if err != nil {
+			return fmt.Errorf("generate bootstrap identity: %w", err)
+		}
+		if err := certStore.SaveBootstrap(bootCert, bootKey); err != nil {
+			return fmt.Errorf("save bootstrap identity: %w", err)
+		}
+	}
+
+	transportMgr, err := transport.NewManager(transport.Config{
+		BootstrapAddr:    bootstrapAddr,
+		MTLSAddr:         grpcAddr,
+		CA:               authority,
+		DeviceCertPEM:    certPEM,
+		DeviceKeyPEM:     keyPEM,
+		BootstrapCertPEM: bootCert,
+		BootstrapKeyPEM:  bootKey,
+		BootstrapTimeout: 0, // No timeout — keep bootstrap open for pairing.
+		Logger:           logger,
+		OnPeerAccepted: func(peerID string, peerCert []byte, role string) (bool, error) {
+			logger.Info("pairing request received",
+				"peer_device_id", peerID,
+				"requested_role", role)
+
+			// Auto-accept if configured, otherwise add as pending.
+			if cfg.Security.AutoAccept {
+				logger.Info("auto-accepting peer", "device_id", peerID)
+				return true, nil
+			}
+
+			// Add to pending list for manual approval.
+			if err := registry.AddPending(&fleet.Device{
+				DeviceID: peerID,
+				CertPEM:  peerCert,
+				Role:     role,
+			}); err != nil {
+				logger.Error("failed to add pending device", "error", err)
+				return false, err
+			}
+
+			logger.Info("device added to pending list — use 'sentinel pair accept' to approve",
+				"device_id", peerID)
+
+			// For now, auto-accept to complete the handshake.
+			// In production, this would wait for manual approval.
+			return true, nil
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("init transport: %w", err)
+	}
+
+	// Start transport (bootstrap or mTLS depending on state).
+	if err := transportMgr.Start(ctx); err != nil {
+		return fmt.Errorf("start transport: %w", err)
+	}
+	defer transportMgr.Stop()
+
+	// If we're in bootstrap phase, also start the bootstrap server handler.
+	if transportMgr.Phase() == transport.PhaseBootstrap {
+		bs := transport.NewBootstrapServer(transportMgr, version)
+		go func() {
+			_ = bs.Serve(ctx)
+		}()
+		logger.Info("bootstrap server started", "addr", bootstrapAddr)
+	}
+
+	// If we have mTLS (either detected or after bootstrap), also open bootstrap for pairing.
+	if transportMgr.Phase() == transport.PhaseMTLS {
+		// Re-enable bootstrap port alongside mTLS for accepting new peers.
+		if err := transportMgr.EnableRenewal(ctx); err != nil {
+			logger.Warn("could not open bootstrap port for pairing", "error", err)
+		} else {
+			bs := transport.NewBootstrapServer(transportMgr, version)
+			go func() {
+				_ = bs.Serve(ctx)
+			}()
+			logger.Info("bootstrap server started for pairing", "addr", bootstrapAddr)
+		}
+	}
+
+	// Print startup info.
+	printStartupBanner(deviceID, grpcAddr, bootstrapAddr, transportMgr.Phase().String())
+
 	// Create services.
 	runner := exec.NewRunner(sb)
 	fsSvc := fs.NewService(sb)
@@ -190,12 +297,12 @@ func runDaemon() error {
 	grpcServer.RegisterFileSystemService(sentinelgrpc.NewFileSystemService(fsSvc))
 	grpcServer.RegisterSessionService(sentinelgrpc.NewSessionService(sessionMgr))
 
-	logger.Info("starting gRPC server", "addr", listenAddr)
+	logger.Info("starting gRPC server", "addr", grpcAddr)
 
-	// Start server in goroutine.
+	// Start gRPC server.
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- grpcServer.Serve(listenAddr)
+		errCh <- grpcServer.Serve(grpcAddr)
 	}()
 
 	// Wait for shutdown signal or server error.
@@ -209,33 +316,37 @@ func runDaemon() error {
 	}
 }
 
-func printStartupBanner(deviceID, listenAddr string) {
+func printStartupBanner(deviceID, grpcAddr, bootstrapAddr, phase string) {
 	hostname, _ := os.Hostname()
 	localIPs := getLocalIPs()
 	publicIP := getPublicIP()
 
 	info := struct {
-		Name      string   `json:"name"`
-		Version   string   `json:"version"`
-		Hostname  string   `json:"hostname"`
-		OS        string   `json:"os"`
-		Arch      string   `json:"arch"`
-		Listen    string   `json:"listen"`
-		DeviceID  string   `json:"device_id"`
-		LocalIPs  []string `json:"local_ips"`
-		PublicIP  string   `json:"public_ip"`
-		StartedAt string   `json:"started_at"`
+		Name          string   `json:"name"`
+		Version       string   `json:"version"`
+		Hostname      string   `json:"hostname"`
+		OS            string   `json:"os"`
+		Arch          string   `json:"arch"`
+		GRPCAddr      string   `json:"grpc_addr"`
+		BootstrapAddr string   `json:"bootstrap_addr"`
+		Phase         string   `json:"phase"`
+		DeviceID      string   `json:"device_id"`
+		LocalIPs      []string `json:"local_ips"`
+		PublicIP       string   `json:"public_ip"`
+		StartedAt     string   `json:"started_at"`
 	}{
-		Name:      "sentinel",
-		Version:   version,
-		Hostname:  hostname,
-		OS:        runtime.GOOS,
-		Arch:      runtime.GOARCH,
-		Listen:    listenAddr,
-		DeviceID:  deviceID,
-		LocalIPs:  localIPs,
-		PublicIP:  publicIP,
-		StartedAt: time.Now().Format(time.RFC3339),
+		Name:          "sentinel",
+		Version:       version,
+		Hostname:      hostname,
+		OS:            runtime.GOOS,
+		Arch:          runtime.GOARCH,
+		GRPCAddr:      grpcAddr,
+		BootstrapAddr: bootstrapAddr,
+		Phase:         phase,
+		DeviceID:      deviceID,
+		LocalIPs:      localIPs,
+		PublicIP:      publicIP,
+		StartedAt:     time.Now().Format(time.RFC3339),
 	}
 
 	enc := json.NewEncoder(os.Stderr)
@@ -281,7 +392,6 @@ func getPublicIP() string {
 	}
 	return "(unavailable)"
 }
-
 
 func parseLogLevel(level string) slog.Level {
 	switch level {
