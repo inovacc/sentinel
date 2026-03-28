@@ -29,19 +29,21 @@ func newExecCmd() *cobra.Command {
 			stream, _ := cmd.Flags().GetBool("stream")
 			timeout, _ := cmd.Flags().GetInt("timeout")
 			workDir, _ := cmd.Flags().GetString("workdir")
+			bg, _ := cmd.Flags().GetBool("background")
 
-			return runExec(deviceID, command, cmdArgs, workDir, int32(timeout), stream)
+			return runExec(deviceID, command, cmdArgs, workDir, int32(timeout), stream, bg)
 		},
 	}
 
 	execCmd.Flags().BoolP("stream", "s", false, "Stream output in real-time")
 	execCmd.Flags().IntP("timeout", "t", 30, "Command timeout in seconds")
 	execCmd.Flags().StringP("workdir", "w", "", "Working directory on the remote device")
+	execCmd.Flags().BoolP("background", "b", false, "Start process in background (detached)")
 
 	return execCmd
 }
 
-func runExec(deviceID, command string, args []string, workDir string, timeout int32, stream bool) error {
+func runExec(deviceID, command string, args []string, workDir string, timeout int32, stream, background bool) error {
 	// Resolve device address from fleet registry.
 	addr, err := client.ResolveDevice(deviceID, datadir.DBPath())
 	if err != nil {
@@ -69,11 +71,11 @@ func runExec(deviceID, command string, args []string, workDir string, timeout in
 	if stream {
 		return runExecStream(ctx, c, command, args, workDir, timeout, enc)
 	}
-	return runExecUnary(ctx, c, command, args, workDir, timeout, enc)
+	return runExecUnary(ctx, c, command, args, workDir, timeout, background, enc)
 }
 
-func runExecUnary(ctx context.Context, c *client.Client, command string, args []string, workDir string, timeout int32, enc *json.Encoder) error {
-	resp, err := c.Exec(ctx, command, args, workDir, timeout)
+func runExecUnary(ctx context.Context, c *client.Client, command string, args []string, workDir string, timeout int32, background bool, enc *json.Encoder) error {
+	resp, err := c.Exec(ctx, command, args, workDir, timeout, background)
 	if err != nil {
 		return fmt.Errorf("exec: %w", err)
 	}

@@ -30,6 +30,7 @@ type RunRequest struct {
 	WorkingDir string // relative to sandbox root if not absolute
 	Env        map[string]string
 	Timeout    time.Duration
+	Background bool // if true, start process and return immediately without waiting
 }
 
 // RunResult holds the output of a completed command.
@@ -41,7 +42,12 @@ type RunResult struct {
 }
 
 // Run executes a command and returns the captured result.
+// If req.Background is true, starts the process detached and returns immediately.
 func (r *Runner) Run(ctx context.Context, req *RunRequest) (*RunResult, error) {
+	if req.Background {
+		return r.runBackground(ctx, req)
+	}
+
 	if err := r.sandbox.CheckExec(req.Command, req.Args); err != nil {
 		return nil, fmt.Errorf("exec: %w", err)
 	}
@@ -81,6 +87,36 @@ func (r *Runner) Run(ctx context.Context, req *RunRequest) (*RunResult, error) {
 	}
 
 	return result, nil
+}
+
+// runBackground starts a process detached and returns immediately with its PID.
+func (r *Runner) runBackground(ctx context.Context, req *RunRequest) (*RunResult, error) {
+	if err := r.sandbox.CheckExec(req.Command, req.Args); err != nil {
+		return nil, fmt.Errorf("exec: %w", err)
+	}
+
+	cmd, err := r.buildCmd(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	// Detach: don't capture stdout/stderr, let process run independently.
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("exec: start background: %w", err)
+	}
+
+	pid := cmd.Process.Pid
+
+	// Release the process so it's not killed when we return.
+	_ = cmd.Process.Release()
+
+	return &RunResult{
+		Stdout:     fmt.Sprintf("started in background (PID %d)", pid),
+		DurationMs: 0,
+	}, nil
 }
 
 // RunStream executes a command and streams output via a callback.

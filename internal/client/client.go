@@ -98,12 +98,14 @@ func ConnectFromStore(addr string, certDir string) (*Client, error) {
 }
 
 // Exec executes a command on the remote device and returns the full response.
-func (c *Client) Exec(ctx context.Context, command string, args []string, workingDir string, timeout int32) (*v1.ExecResponse, error) {
+func (c *Client) Exec(ctx context.Context, command string, args []string, workingDir string, timeout int32, background ...bool) (*v1.ExecResponse, error) {
+	bg := len(background) > 0 && background[0]
 	req := &v1.ExecRequest{
 		Command:        command,
 		Args:           args,
 		WorkingDir:     workingDir,
 		TimeoutSeconds: timeout,
+		Background:     bg,
 	}
 
 	resp, err := c.exec.Exec(ctx, req)

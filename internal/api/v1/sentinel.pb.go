@@ -75,6 +75,7 @@ type ExecRequest struct {
 	Env            map[string]string      `protobuf:"bytes,4,rep,name=env,proto3" json:"env,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	TimeoutSeconds int32                  `protobuf:"varint,5,opt,name=timeout_seconds,json=timeoutSeconds,proto3" json:"timeout_seconds,omitempty"`
 	SessionId      string                 `protobuf:"bytes,6,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	Background     bool                   `protobuf:"varint,7,opt,name=background,proto3" json:"background,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -149,6 +150,13 @@ func (x *ExecRequest) GetSessionId() string {
 		return x.SessionId
 	}
 	return ""
+}
+
+func (x *ExecRequest) GetBackground() bool {
+	if x != nil {
+		return x.Background
+	}
+	return false
 }
 
 type ExecResponse struct {
@@ -1283,7 +1291,7 @@ var File_proto_v1_sentinel_proto protoreflect.FileDescriptor
 
 const file_proto_v1_sentinel_proto_rawDesc = "" +
 	"\n" +
-	"\x17proto/v1/sentinel.proto\x12\vsentinel.v1\"\x91\x02\n" +
+	"\x17proto/v1/sentinel.proto\x12\vsentinel.v1\"\xb1\x02\n" +
 	"\vExecRequest\x12\x18\n" +
 	"\acommand\x18\x01 \x01(\tR\acommand\x12\x12\n" +
 	"\x04args\x18\x02 \x03(\tR\x04args\x12\x1f\n" +
@@ -1292,7 +1300,10 @@ const file_proto_v1_sentinel_proto_rawDesc = "" +
 	"\x03env\x18\x04 \x03(\v2!.sentinel.v1.ExecRequest.EnvEntryR\x03env\x12'\n" +
 	"\x0ftimeout_seconds\x18\x05 \x01(\x05R\x0etimeoutSeconds\x12\x1d\n" +
 	"\n" +
-	"session_id\x18\x06 \x01(\tR\tsessionId\x1a6\n" +
+	"session_id\x18\x06 \x01(\tR\tsessionId\x12\x1e\n" +
+	"\n" +
+	"background\x18\a \x01(\bR\n" +
+	"background\x1a6\n" +
 	"\bEnvEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"|\n" +

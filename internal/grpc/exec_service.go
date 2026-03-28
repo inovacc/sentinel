@@ -114,6 +114,7 @@ func protoToRunRequest(req *v1.ExecRequest) *exec.RunRequest {
 		Args:       req.Args,
 		WorkingDir: req.WorkingDir,
 		Env:        req.Env,
+		Background: req.Background,
 	}
 	if req.TimeoutSeconds > 0 {
 		r.Timeout = time.Duration(req.TimeoutSeconds) * time.Second

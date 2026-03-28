@@ -39,6 +39,7 @@ message ExecRequest {
   map<string, string> env = 4;
   int32 timeout_seconds = 5;
   string session_id = 6;
+  bool background = 7;
 }
 
 message ExecResponse {
