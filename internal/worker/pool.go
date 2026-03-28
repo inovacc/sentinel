@@ -139,8 +139,8 @@ func (p *Pool) Spawn(ctx context.Context, command string, args []string, workDir
 	id := uuid.New().String()[:8]
 	now := time.Now()
 
-	// Build command.
-	cmd := osexec.CommandContext(ctx, command, args...)
+	// Build command with background context — workers outlive the RPC call.
+	cmd := osexec.Command(command, args...)
 	if workDir != "" {
 		resolved, err := p.sandbox.ResolvePath(workDir)
 		if err != nil {
