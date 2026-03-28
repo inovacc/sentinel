@@ -34,8 +34,8 @@ build/
 .env
 .env.*
 
-# Generated protobuf
-internal/api/v1/*.pb.go
+# Generated protobuf (tracked — required for go install)
+# internal/api/v1/*.pb.go
 
 # SQLite databases (runtime)
 *.db
