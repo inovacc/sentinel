@@ -136,7 +136,7 @@ func TestWriteFile(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			svc, root := newTestService(t)
-			path := tt.path
+			var path string
 			if tt.name == "write file outside sandbox denied" {
 				outsideDir := t.TempDir()
 				path = filepath.Join(outsideDir, "outside.txt")

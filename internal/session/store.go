@@ -184,21 +184,7 @@ func updateSessionFailed(db *sql.DB, id string, errorInfo string, now time.Time)
 	return nil
 }
 
-// updateSessionContext updates the context JSON of a session.
-func updateSessionContext(db *sql.DB, id string, sc *SessionContext, now time.Time) error {
-	ctxJSON, err := json.Marshal(sc)
-	if err != nil {
-		return fmt.Errorf("marshal context: %w", err)
-	}
-	_, err = db.Exec(
-		`UPDATE sessions SET context = ?, updated_at = ? WHERE id = ?`,
-		string(ctxJSON), now.Unix(), id,
-	)
-	if err != nil {
-		return fmt.Errorf("update session context: %w", err)
-	}
-	return nil
-}
+
 
 // selectSessions lists sessions with optional device and status filters.
 func selectSessions(db *sql.DB, deviceID string, statusFilter Status, limit int) ([]Session, error) {
@@ -424,23 +410,3 @@ func markActiveAsInterrupted(db *sql.DB, now time.Time) (int64, error) {
 	return n, nil
 }
 
-// selectActiveSessionIDs returns all session IDs with active status.
-func selectActiveSessionIDs(db *sql.DB) ([]string, error) {
-	rows, err := db.Query(
-		`SELECT id FROM sessions WHERE status = ?`, string(StatusActive),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("select active sessions: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, fmt.Errorf("scan session id: %w", err)
-		}
-		ids = append(ids, id)
-	}
-	return ids, rows.Err()
-}
