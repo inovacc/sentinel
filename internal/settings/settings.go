@@ -86,7 +86,7 @@ func DefaultConfig() *Config {
 		Sandbox: SandboxConfig{
 			MaxSizeGB: 10,
 			Allowlist: AllowlistConfig{
-				Exec: []string{"go", "git", "npm", "node", "python3", "python", "cargo", "make", "task", "scout", "sentinel"},
+				Exec: []string{"go", "git", "npm", "node", "python3", "python", "cargo", "make", "task", "scout", "sentinel", "omni", "unravel"},
 				BlockedCommands: []string{
 					"rm -rf /",
 					"format",
