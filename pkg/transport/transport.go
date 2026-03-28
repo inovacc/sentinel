@@ -182,6 +182,14 @@ func (m *Manager) DeviceID() string {
 	return m.deviceID
 }
 
+// BootstrapDeviceID returns the device ID derived from the bootstrap certificate.
+// This must be used in bootstrap Hello messages to match the TLS cert presented.
+func (m *Manager) BootstrapDeviceID() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.deviceID
+}
+
 // Start begins the transport lifecycle. In bootstrap mode, it opens the bootstrap
 // port and waits for peers. In mTLS mode, it opens the production port directly.
 func (m *Manager) Start(ctx context.Context) error {

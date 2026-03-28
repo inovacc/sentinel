@@ -108,8 +108,9 @@ func (bs *BootstrapServer) handleConn(ctx context.Context, conn net.Conn) {
 	}
 
 	// --- Step 1: Exchange Hello ---
+	// Use bootstrap device ID (matches the self-signed TLS cert on this port).
 	hello := HelloMessage{
-		DeviceID:  bs.manager.DeviceID(),
+		DeviceID:  bs.manager.BootstrapDeviceID(),
 		Hostname:  bs.hostname,
 		OS:        runtime.GOOS,
 		Arch:      runtime.GOARCH,
