@@ -153,3 +153,8 @@ func (s *Server) RegisterCaptureService(svc v1.CaptureServiceServer) {
 func (s *Server) RegisterSessionService(svc v1.SessionServiceServer) {
 	v1.RegisterSessionServiceServer(s.grpcServer, svc)
 }
+
+// RegisterPayloadService registers the PayloadService implementation.
+func (s *Server) RegisterPayloadService(svc v1.PayloadServiceServer) {
+	v1.RegisterPayloadServiceServer(s.grpcServer, svc)
+}

@@ -21,10 +21,11 @@ const (
 
 // Client connects to a remote sentinel daemon via gRPC/mTLS.
 type Client struct {
-	conn *grpc.ClientConn
-	exec v1.ExecServiceClient
-	fs   v1.FileSystemServiceClient
-	sess v1.SessionServiceClient
+	conn    *grpc.ClientConn
+	exec    v1.ExecServiceClient
+	fs      v1.FileSystemServiceClient
+	sess    v1.SessionServiceClient
+	payload v1.PayloadServiceClient
 }
 
 // Connect dials the remote sentinel at addr using mTLS credentials.
@@ -69,10 +70,11 @@ func Connect(addr string, certPEM, keyPEM, caCertPEM []byte) (*Client, error) {
 	}
 
 	return &Client{
-		conn: conn,
-		exec: v1.NewExecServiceClient(conn),
-		fs:   v1.NewFileSystemServiceClient(conn),
-		sess: v1.NewSessionServiceClient(conn),
+		conn:    conn,
+		exec:    v1.NewExecServiceClient(conn),
+		fs:      v1.NewFileSystemServiceClient(conn),
+		sess:    v1.NewSessionServiceClient(conn),
+		payload: v1.NewPayloadServiceClient(conn),
 	}, nil
 }
 
@@ -230,6 +232,19 @@ func (c *Client) Upload(ctx context.Context, targetPath string, data []byte) err
 	}
 
 	return nil
+}
+
+// SendPayload sends a structured JSON payload to the remote device.
+func (c *Client) SendPayload(ctx context.Context, action, payload string, metadata map[string]string) (*v1.PayloadResponse, error) {
+	resp, err := c.payload.Send(ctx, &v1.PayloadRequest{
+		Action:   action,
+		Payload:  payload,
+		Metadata: metadata,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("client: payload: %w", err)
+	}
+	return resp, nil
 }
 
 // Close closes the gRPC connection.

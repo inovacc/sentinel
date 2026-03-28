@@ -23,6 +23,7 @@ import (
 	"github.com/inovacc/sentinel/internal/fleet"
 	"github.com/inovacc/sentinel/internal/fs"
 	sentinelgrpc "github.com/inovacc/sentinel/internal/grpc"
+	"github.com/inovacc/sentinel/internal/payload"
 	"github.com/inovacc/sentinel/internal/logrotate"
 	"github.com/inovacc/sentinel/internal/rbac"
 	"github.com/inovacc/sentinel/internal/sandbox"
@@ -280,10 +281,14 @@ func runDaemon() error {
 		return fmt.Errorf("init gRPC server: %w", err)
 	}
 
+	// Create payload handler registry.
+	payloadRegistry := payload.NewRegistry()
+
 	// Register services.
 	grpcServer.RegisterExecService(sentinelgrpc.NewExecService(runner, sessionMgr))
 	grpcServer.RegisterFileSystemService(sentinelgrpc.NewFileSystemService(fsSvc))
 	grpcServer.RegisterSessionService(sentinelgrpc.NewSessionService(sessionMgr))
+	grpcServer.RegisterPayloadService(sentinelgrpc.NewPayloadService(payloadRegistry))
 
 	logger.Info("starting gRPC server", "addr", grpcAddr)
 

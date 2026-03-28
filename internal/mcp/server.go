@@ -17,6 +17,7 @@ import (
 	"github.com/inovacc/sentinel/internal/exec"
 	"github.com/inovacc/sentinel/internal/fleet"
 	"github.com/inovacc/sentinel/internal/fs"
+	"github.com/inovacc/sentinel/internal/payload"
 	"github.com/inovacc/sentinel/internal/session"
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"google.golang.org/grpc"
@@ -29,18 +30,20 @@ type Server struct {
 	runner     *exec.Runner
 	fsSvc      *fs.Service
 	sessionMgr *session.Manager
-	dbPath     string // for fleet registry lookups
-	certDir    string // for loading mTLS certs
+	payloadRegistry *payload.Registry
+	dbPath          string // for fleet registry lookups
+	certDir         string // for loading mTLS certs
 }
 
 // NewServer creates an MCP server with all sentinel tools registered.
 func NewServer(runner *exec.Runner, fsSvc *fs.Service, sessionMgr *session.Manager, dbPath, certDir string) *Server {
 	s := &Server{
-		runner:     runner,
-		fsSvc:      fsSvc,
-		sessionMgr: sessionMgr,
-		dbPath:     dbPath,
-		certDir:    certDir,
+		runner:          runner,
+		fsSvc:           fsSvc,
+		sessionMgr:      sessionMgr,
+		payloadRegistry: payload.NewRegistry(),
+		dbPath:          dbPath,
+		certDir:         certDir,
 	}
 
 	s.mcpServer = gomcp.NewServer(
@@ -125,6 +128,11 @@ func (s *Server) registerTools() {
 		Name:        "session_destroy",
 		Description: "End and clean up a session",
 	}, s.handleSessionDestroy)
+
+	gomcp.AddTool(s.mcpServer, &gomcp.Tool{
+		Name:        "payload",
+		Description: "Send a structured JSON payload to a device and receive a JSON response",
+	}, s.handlePayload)
 }
 
 // --- Input types ---
@@ -412,6 +420,63 @@ func (s *Server) handleSessionDestroy(_ context.Context, _ *gomcp.CallToolReques
 		return errResult(err), nil, nil
 	}
 	return txtResult(fmt.Sprintf("Session %s destroyed", input.SessionID)), nil, nil
+}
+
+// --- Payload handler ---
+
+type PayloadInput struct {
+	DeviceID string `json:"device_id,omitempty" jsonschema:"target device ID (empty = local)"`
+	Action   string `json:"action" jsonschema:"action to perform (e.g. ping, sysinfo, echo)"`
+	Payload  string `json:"payload,omitempty" jsonschema:"JSON payload string"`
+}
+
+func (s *Server) handlePayload(_ context.Context, _ *gomcp.CallToolRequest, input PayloadInput) (*gomcp.CallToolResult, any, error) {
+	if !isLocal(input.DeviceID) {
+		return s.remotePayload(input)
+	}
+
+	// Local: use the payload registry directly.
+	var rawPayload json.RawMessage
+	if input.Payload != "" {
+		rawPayload = json.RawMessage(input.Payload)
+	}
+
+	ctx := context.Background()
+	resp, err := s.payloadRegistry.Handle(ctx, input.Action, rawPayload)
+	if err != nil {
+		return errResult(err), nil, nil
+	}
+
+	// Pretty-format the response.
+	var pretty json.RawMessage
+	if err := json.Unmarshal(resp, &pretty); err == nil {
+		formatted, _ := json.MarshalIndent(pretty, "", "  ")
+		return txtResult(string(formatted)), nil, nil
+	}
+	return txtResult(string(resp)), nil, nil
+}
+
+func (s *Server) remotePayload(input PayloadInput) (*gomcp.CallToolResult, any, error) {
+	conn, err := s.dialDevice(input.DeviceID)
+	if err != nil {
+		return errResult(err), nil, nil
+	}
+	defer func() { _ = conn.Close() }()
+
+	client := v1.NewPayloadServiceClient(conn)
+	resp, err := client.Send(context.Background(), &v1.PayloadRequest{
+		Action:  input.Action,
+		Payload: input.Payload,
+	})
+	if err != nil {
+		return errResult(fmt.Errorf("remote payload on %q: %w", input.DeviceID, err)), nil, nil
+	}
+
+	if !resp.Success {
+		return errResult(fmt.Errorf("%s: %s", resp.Action, resp.Error)), nil, nil
+	}
+
+	return txtResult(resp.Payload), nil, nil
 }
 
 // --- remote routing helpers ---
