@@ -321,6 +321,7 @@ func runDaemon() error {
 	grpcServer.RegisterSessionService(sentinelgrpc.NewSessionService(sessionMgr))
 	grpcServer.RegisterPayloadService(sentinelgrpc.NewPayloadService(payloadRegistry))
 	grpcServer.RegisterWorkerService(sentinelgrpc.NewWorkerService(workerPool))
+	grpcServer.RegisterCaptureService(sentinelgrpc.NewCaptureService())
 
 	// Start fleet health monitor.
 	healthMonitor := fleet.NewHealthMonitor(registry, certDir, logger, 60*time.Second)

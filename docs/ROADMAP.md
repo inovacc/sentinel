@@ -81,8 +81,10 @@
 ## Phase 11: Polish
 - [x] Windows service / systemd unit installation
 - [x] Plain text startup banner (--json for JSON)
-- [ ] CI/CD workflow (GitHub Actions)
-- [ ] Config validation on startup
+- [x] CI/CD workflow (GitHub Actions — cross-platform matrix + lint)
+- [x] Config validation on startup
 - [ ] Relay server for NAT traversal
-- [ ] Cross-platform testing matrix
+- [ ] Cross-platform testing verification
+- [ ] Web dashboard for fleet management
+- [ ] Auto-update mechanism across fleet
 - [ ] Comprehensive documentation update

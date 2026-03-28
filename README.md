@@ -9,7 +9,11 @@ Secure remote REPL daemon for [Claude Code](https://claude.com/claude-code). Let
 - **Resumable sessions**: SQLite-persisted sessions with checkpoints and crash recovery
 - **Certificate-based auth**: Syncthing-style device IDs (SHA-256 of cert, base32 with Luhn)
 - **RBAC**: admin/operator/reader roles embedded in X.509 certificate extensions
-- **MCP integration**: Claude Code connects via MCP stdio server with 13 tools
+- **MCP integration**: Claude Code connects via MCP stdio server with 19 tools
+- **Worker pool**: Background process management with spawn/list/get/kill
+- **Payload routing**: Structured JSON payload dispatch with pluggable handlers
+- **Screen capture**: Screenshot displays locally or on remote devices
+- **Fleet discovery**: mDNS-based automatic device discovery on local network
 - **Cross-platform**: Windows, Linux, macOS
 
 ## Quick Start
@@ -63,24 +67,37 @@ Add to `~/.claude/settings.json`:
 | `session_pause` | Pause with checkpoint |
 | `session_status` | Get session details |
 | `session_destroy` | Clean up a session |
+| `payload` | Send structured JSON payload to a device |
+| `worker_spawn` | Spawn a background worker process |
+| `worker_list` | List workers (filter by status) |
+| `worker_get` | Get worker details and output |
+| `worker_kill` | Kill a running worker |
+| `screenshot` | Capture a screenshot of a display |
 
 ## CLI Commands
 
 ```
-sentinel serve          Start gRPC daemon (foreground)
-sentinel server start   Start as background service
-sentinel server stop    Stop background service
-sentinel mcp            Start MCP stdio server
-sentinel ca init        Initialize Certificate Authority
-sentinel ca show        Show device identity
-sentinel ca export      Export CA cert for sharing
-sentinel ca sign        Sign a CSR
-sentinel pair accept    Accept device pairing
-sentinel fleet list     List fleet devices
-sentinel exec           Execute remote command
-sentinel upload         Upload project to sandbox
-sentinel capture        Screenshot remote device
-sentinel version        Show version info
+sentinel serve            Start gRPC daemon (foreground)
+sentinel server start     Start as background service
+sentinel server stop      Stop background service
+sentinel mcp              Start MCP stdio server
+sentinel ca init          Initialize Certificate Authority
+sentinel ca show          Show device identity
+sentinel ca export        Export CA cert for sharing
+sentinel ca sign          Sign a CSR
+sentinel pair accept      Accept device pairing
+sentinel fleet list       List fleet devices
+sentinel exec             Execute remote command
+sentinel upload           Upload project to sandbox
+sentinel capture          Screenshot remote device
+sentinel discover         Discover devices on local network
+sentinel ls               List remote directory
+sentinel payload          Send payload to device
+sentinel worker spawn     Spawn background worker
+sentinel worker list      List workers
+sentinel worker get       Get worker details
+sentinel worker kill      Kill a running worker
+sentinel version          Show version info
 ```
 
 ## Security Model

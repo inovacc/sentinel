@@ -59,6 +59,7 @@ On startup: if mTLS certs exist, skip bootstrap. `--renew-certs` temporarily reo
                     │ sessions │
                     │ events   │
                     │ checkpts │
+                    │ workers  │
                     └────┬─────┘
                          │
 ┌────────┐    ┌──────────┴──────────┐    ┌──────────┐
@@ -70,13 +71,25 @@ On startup: if mTLS certs exist, skip bootstrap. `--renew-certs` temporarily reo
     │         │  - Crash recovery   │    ┌────┴─────┐
 ┌───┴────┐    └─────────────────────┘    │   MCP    │
 │Sandbox │                               │  Server  │
-│        │                               │ (stdio)  │
-│ - Read │                               └──────────┘
-│ - Write│
-│ - Exec │
-│ - Del  │
-└────────┘
+│        │    ┌─────────────────────┐    │ (stdio)  │
+│ - Read │    │    Worker Pool      │    └──────────┘
+│ - Write│    │  - Spawn/Kill       │
+│ - Exec │    │  - Status tracking  │
+│ - Del  │    │  - Output capture   │
+└────────┘    └─────────────────────┘
 ```
+
+## gRPC Services
+
+| Service | Proto | Description |
+|---------|-------|-------------|
+| ExecService | sentinel.proto | Command execution within sandbox |
+| FileSystemService | sentinel.proto | File read/write/list/glob/grep/delete |
+| SessionService | session.proto | Session lifecycle and checkpoints |
+| FleetService | fleet.proto | Device registration, pairing, health |
+| CaptureService | fleet.proto | Screenshot, window capture, display listing |
+| PayloadService | fleet.proto | Structured JSON payload dispatch |
+| WorkerService | fleet.proto | Background process spawn/list/get/kill |
 
 ## Directory Structure
 
@@ -89,9 +102,10 @@ sentinel/
 │   ├── mcp.go                       # MCP stdio server
 │   ├── ca.go                        # CA management
 │   └── ...                          # pair, fleet, exec, upload, capture, server, version
+│                                    # discover, ls, payload, worker
 ├── proto/v1/                        # Protobuf definitions
 │   ├── sentinel.proto               # ExecService, FileSystemService
-│   ├── fleet.proto                  # FleetService, CaptureService
+│   ├── fleet.proto                  # FleetService, CaptureService, PayloadService, WorkerService
 │   └── session.proto                # SessionService
 ├── pkg/
 │   └── transport/                   # Two-phase transport lifecycle
@@ -103,13 +117,16 @@ sentinel/
 ├── internal/
 │   ├── api/v1/                      # Generated protobuf Go code
 │   ├── grpc/                        # gRPC server + service implementations
-│   │   ├── server.go                # mTLS server setup
+│   │   ├── server.go                # mTLS server setup + service registration
 │   │   ├── interceptor.go           # RBAC auth interceptor
 │   │   ├── exec_service.go          # ExecService impl
 │   │   ├── fs_service.go            # FileSystemService impl
-│   │   └── session_service.go       # SessionService impl
+│   │   ├── session_service.go       # SessionService impl
+│   │   ├── payload_service.go       # PayloadService impl
+│   │   ├── worker_service.go        # WorkerService impl
+│   │   └── capture_service.go       # CaptureService impl
 │   ├── mcp/                         # MCP stdio server
-│   │   └── server.go                # 13 tools for Claude Code
+│   │   └── server.go                # 19 tools for Claude Code
 │   ├── ca/                          # Certificate Authority
 │   │   ├── ca.go                    # P-256 ECDSA CA
 │   │   ├── identity.go              # Syncthing-style device IDs
@@ -119,6 +136,12 @@ sentinel/
 │   ├── session/                     # Session manager (SQLite)
 │   ├── exec/                        # Command execution engine
 │   ├── fs/                          # File operations engine
+│   ├── capture/                     # Screen capture (platform-specific)
+│   ├── fleet/                       # Fleet registry + health monitor
+│   ├── discovery/                   # mDNS device discovery
+│   ├── client/                      # gRPC client helpers
+│   ├── worker/                      # Worker pool (background processes)
+│   ├── payload/                     # Payload handler registry
 │   ├── supervisor/                  # Monitor/worker process pattern
 │   ├── settings/                    # YAML configuration
 │   ├── datadir/                     # Platform data directories
@@ -140,3 +163,6 @@ sentinel/
 | Fleet Register, AcceptPairing | x | | |
 | Fleet ListDevices, DeviceStatus, Health | x | x | x |
 | Screenshot, CaptureWindow, ListDisplays | x | x | x |
+| Payload Send | x | x | |
+| Worker Spawn, Kill | x | x | |
+| Worker List, Get | x | x | x |

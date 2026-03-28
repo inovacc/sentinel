@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	v1 "github.com/inovacc/sentinel/internal/api/v1"
+	"github.com/inovacc/sentinel/internal/capture"
 	"github.com/inovacc/sentinel/internal/exec"
 	"github.com/inovacc/sentinel/internal/fleet"
 	"github.com/inovacc/sentinel/internal/fs"
@@ -156,6 +158,11 @@ func (s *Server) registerTools() {
 		Name:        "worker_kill",
 		Description: "Kill a running worker on a device",
 	}, s.handleWorkerKill)
+
+	gomcp.AddTool(s.mcpServer, &gomcp.Tool{
+		Name:        "screenshot",
+		Description: "Capture a screenshot of a display on the target device",
+	}, s.handleScreenshot)
 }
 
 // --- Input types ---
@@ -921,4 +928,60 @@ func (s *Server) remoteWorkerKill(input WorkerKillInput) (*gomcp.CallToolResult,
 	}
 
 	return txtResult(fmt.Sprintf("Worker %s killed on device %s", input.WorkerID, input.DeviceID)), nil, nil
+}
+
+// --- Screenshot ---
+
+type ScreenshotInput struct {
+	DeviceID string `json:"device_id,omitempty" jsonschema:"target device ID (empty = local)"`
+	Display  int    `json:"display,omitempty" jsonschema:"display index (default 0)"`
+	Quality  int    `json:"quality,omitempty" jsonschema:"JPEG quality 1-99 (0 or 100 = PNG)"`
+}
+
+func (s *Server) handleScreenshot(_ context.Context, _ *gomcp.CallToolRequest, input ScreenshotInput) (*gomcp.CallToolResult, any, error) {
+	if !isLocal(input.DeviceID) {
+		return s.remoteScreenshot(input)
+	}
+
+	data, format, err := capture.Screenshot(input.Display, input.Quality)
+	if err != nil {
+		return errResult(err), nil, nil
+	}
+
+	encoded := base64.StdEncoding.EncodeToString(data)
+	result := map[string]any{
+		"format":      format,
+		"size_bytes":  len(data),
+		"image_base64": encoded,
+	}
+	out, _ := json.MarshalIndent(result, "", "  ")
+	return txtResult(string(out)), nil, nil
+}
+
+func (s *Server) remoteScreenshot(input ScreenshotInput) (*gomcp.CallToolResult, any, error) {
+	conn, err := s.dialDevice(input.DeviceID)
+	if err != nil {
+		return errResult(err), nil, nil
+	}
+	defer func() { _ = conn.Close() }()
+
+	client := v1.NewCaptureServiceClient(conn)
+	resp, err := client.Screenshot(context.Background(), &v1.ScreenshotRequest{
+		Display: int32(input.Display),
+		Quality: int32(input.Quality),
+	})
+	if err != nil {
+		return errResult(fmt.Errorf("remote screenshot on %q: %w", input.DeviceID, err)), nil, nil
+	}
+
+	encoded := base64.StdEncoding.EncodeToString(resp.Image)
+	result := map[string]any{
+		"format":       resp.Format,
+		"width":        resp.Width,
+		"height":       resp.Height,
+		"size_bytes":   len(resp.Image),
+		"image_base64": encoded,
+	}
+	out, _ := json.MarshalIndent(result, "", "  ")
+	return txtResult(string(out)), nil, nil
 }
