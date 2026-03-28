@@ -35,6 +35,10 @@ func NewPolicy() *Policy {
 			"/sentinel.v1.SessionService/Pause":           "operator",
 			"/sentinel.v1.SessionService/Checkpoint":      "operator",
 
+			// Operator: Payload service
+			"/sentinel.v1.PayloadService/Send":       "operator",
+			"/sentinel.v1.PayloadService/SendStream": "operator",
+
 			// Reader (reader + operator + admin)
 			"/sentinel.v1.FileSystemService/ReadFile":    "reader",
 			"/sentinel.v1.FileSystemService/ListDir":     "reader",
