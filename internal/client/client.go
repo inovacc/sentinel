@@ -26,6 +26,7 @@ type Client struct {
 	fs      v1.FileSystemServiceClient
 	sess    v1.SessionServiceClient
 	payload v1.PayloadServiceClient
+	worker  v1.WorkerServiceClient
 }
 
 // Connect dials the remote sentinel at addr using mTLS credentials.
@@ -75,6 +76,7 @@ func Connect(addr string, certPEM, keyPEM, caCertPEM []byte) (*Client, error) {
 		fs:      v1.NewFileSystemServiceClient(conn),
 		sess:    v1.NewSessionServiceClient(conn),
 		payload: v1.NewPayloadServiceClient(conn),
+		worker:  v1.NewWorkerServiceClient(conn),
 	}, nil
 }
 
@@ -247,6 +249,65 @@ func (c *Client) SendPayload(ctx context.Context, action, payload string, metada
 		return nil, fmt.Errorf("client: payload: %w", err)
 	}
 	return resp, nil
+}
+
+// SpawnWorker spawns a new worker on the remote device.
+func (c *Client) SpawnWorker(ctx context.Context, command string, args []string, workDir string, env map[string]string, sessionID string, metadata map[string]string, timeout int32) (*v1.SpawnWorkerResponse, error) {
+	resp, err := c.worker.Spawn(ctx, &v1.SpawnWorkerRequest{
+		Command:        command,
+		Args:           args,
+		WorkingDir:     workDir,
+		Env:            env,
+		SessionId:      sessionID,
+		Metadata:       metadata,
+		TimeoutSeconds: timeout,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("client: spawn worker: %w", err)
+	}
+	return resp, nil
+}
+
+// ListWorkers lists workers on the remote device with optional status filter.
+func (c *Client) ListWorkers(ctx context.Context, statusFilter string) (*v1.ListWorkersResponse, error) {
+	resp, err := c.worker.List(ctx, &v1.ListWorkersRequest{
+		StatusFilter: statusFilter,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("client: list workers: %w", err)
+	}
+	return resp, nil
+}
+
+// GetWorker gets details for a specific worker on the remote device.
+func (c *Client) GetWorker(ctx context.Context, workerID string) (*v1.WorkerInfo, error) {
+	resp, err := c.worker.Get(ctx, &v1.GetWorkerRequest{
+		WorkerId: workerID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("client: get worker: %w", err)
+	}
+	return resp, nil
+}
+
+// KillWorker kills a running worker on the remote device.
+func (c *Client) KillWorker(ctx context.Context, workerID string) error {
+	_, err := c.worker.Kill(ctx, &v1.KillWorkerRequest{
+		WorkerId: workerID,
+	})
+	if err != nil {
+		return fmt.Errorf("client: kill worker: %w", err)
+	}
+	return nil
+}
+
+// KillAllWorkers kills all running workers on the remote device.
+func (c *Client) KillAllWorkers(ctx context.Context) (int32, error) {
+	resp, err := c.worker.KillAll(ctx, &v1.KillAllWorkersRequest{})
+	if err != nil {
+		return 0, fmt.Errorf("client: kill all workers: %w", err)
+	}
+	return resp.GetKilledCount(), nil
 }
 
 // Close closes the gRPC connection.

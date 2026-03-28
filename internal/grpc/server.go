@@ -158,3 +158,8 @@ func (s *Server) RegisterSessionService(svc v1.SessionServiceServer) {
 func (s *Server) RegisterPayloadService(svc v1.PayloadServiceServer) {
 	v1.RegisterPayloadServiceServer(s.grpcServer, svc)
 }
+
+// RegisterWorkerService registers the WorkerService implementation.
+func (s *Server) RegisterWorkerService(svc v1.WorkerServiceServer) {
+	v1.RegisterWorkerServiceServer(s.grpcServer, svc)
+}

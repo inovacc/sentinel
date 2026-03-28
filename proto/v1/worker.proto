@@ -1,0 +1,83 @@
+syntax = "proto3";
+package sentinel.v1;
+option go_package = "github.com/inovacc/sentinel/internal/api/v1;v1";
+
+// WorkerService manages parallel task workers on remote machines.
+service WorkerService {
+  // Spawn a new worker process.
+  rpc Spawn(SpawnWorkerRequest) returns (SpawnWorkerResponse);
+  // List all workers with optional status filter.
+  rpc List(ListWorkersRequest) returns (ListWorkersResponse);
+  // Get details for a specific worker.
+  rpc Get(GetWorkerRequest) returns (WorkerInfo);
+  // Kill a running worker.
+  rpc Kill(KillWorkerRequest) returns (KillWorkerResponse);
+  // Kill all running workers.
+  rpc KillAll(KillAllWorkersRequest) returns (KillAllWorkersResponse);
+  // Wait for a worker to complete.
+  rpc Wait(WaitWorkerRequest) returns (WorkerInfo);
+}
+
+message SpawnWorkerRequest {
+  string command = 1;
+  repeated string args = 2;
+  string working_dir = 3;
+  map<string, string> env = 4;
+  string session_id = 5;
+  map<string, string> metadata = 6;
+  int32 timeout_seconds = 7;
+}
+
+message SpawnWorkerResponse {
+  string worker_id = 1;
+  int32 pid = 2;
+}
+
+message ListWorkersRequest {
+  string status_filter = 1;
+}
+
+message ListWorkersResponse {
+  repeated WorkerInfo workers = 1;
+  int32 active_count = 2;
+  int32 total_count = 3;
+}
+
+message GetWorkerRequest {
+  string worker_id = 1;
+}
+
+message KillWorkerRequest {
+  string worker_id = 1;
+}
+
+message KillWorkerResponse {
+  bool killed = 1;
+}
+
+message KillAllWorkersRequest {}
+
+message KillAllWorkersResponse {
+  int32 killed_count = 1;
+}
+
+message WaitWorkerRequest {
+  string worker_id = 1;
+}
+
+message WorkerInfo {
+  string id = 1;
+  string command = 2;
+  repeated string args = 3;
+  int32 pid = 4;
+  string status = 5;
+  int64 created_at = 6;
+  int64 started_at = 7;
+  int64 finished_at = 8;
+  string stdout = 9;
+  string stderr = 10;
+  int32 exit_code = 11;
+  string session_id = 12;
+  map<string, string> metadata = 13;
+  int64 duration_ms = 14;
+}

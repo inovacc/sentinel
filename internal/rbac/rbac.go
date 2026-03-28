@@ -39,6 +39,16 @@ func NewPolicy() *Policy {
 			"/sentinel.v1.PayloadService/Send":       "operator",
 			"/sentinel.v1.PayloadService/SendStream": "operator",
 
+			// Operator: Worker service
+			"/sentinel.v1.WorkerService/Spawn":   "operator",
+			"/sentinel.v1.WorkerService/Kill":     "operator",
+			"/sentinel.v1.WorkerService/KillAll":  "operator",
+			"/sentinel.v1.WorkerService/Wait":     "operator",
+
+			// Reader: Worker service
+			"/sentinel.v1.WorkerService/List": "reader",
+			"/sentinel.v1.WorkerService/Get":  "reader",
+
 			// Reader (reader + operator + admin)
 			"/sentinel.v1.FileSystemService/ReadFile":    "reader",
 			"/sentinel.v1.FileSystemService/ListDir":     "reader",

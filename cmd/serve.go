@@ -23,18 +23,21 @@ import (
 	"github.com/inovacc/sentinel/internal/fleet"
 	"github.com/inovacc/sentinel/internal/fs"
 	sentinelgrpc "github.com/inovacc/sentinel/internal/grpc"
-	"github.com/inovacc/sentinel/internal/payload"
 	"github.com/inovacc/sentinel/internal/logrotate"
+	"github.com/inovacc/sentinel/internal/payload"
 	"github.com/inovacc/sentinel/internal/rbac"
 	"github.com/inovacc/sentinel/internal/sandbox"
 	"github.com/inovacc/sentinel/internal/serverinfo"
 	"github.com/inovacc/sentinel/internal/session"
 	"github.com/inovacc/sentinel/internal/settings"
+	"github.com/inovacc/sentinel/internal/worker"
 	"github.com/inovacc/sentinel/pkg/transport"
 	"github.com/spf13/cobra"
 
 	_ "modernc.org/sqlite"
 )
+
+var serveJSON bool
 
 func newServeCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -45,6 +48,7 @@ func newServeCmd() *cobra.Command {
 			return runDaemon()
 		},
 	}
+	cmd.Flags().BoolVar(&serveJSON, "json", false, "Output startup banner as JSON")
 	return cmd
 }
 
@@ -183,6 +187,13 @@ func runDaemon() error {
 		logger.Info("recovered interrupted sessions", "count", recovered)
 	}
 
+	// Initialize worker pool.
+	workerPool, err := worker.NewPool(db, sb, worker.WithLogger(logger))
+	if err != nil {
+		return fmt.Errorf("init worker pool: %w", err)
+	}
+	defer workerPool.Stop()
+
 	// --- Transport: Bootstrap + mTLS ---
 
 	// Generate or load bootstrap identity.
@@ -268,7 +279,7 @@ func runDaemon() error {
 	if transportMgr.BootstrapListener() != nil {
 		phase = "mtls+bootstrap"
 	}
-	printStartupBanner(deviceID, grpcAddr, bootstrapAddr, phase)
+	printStartupBanner(deviceID, grpcAddr, bootstrapAddr, phase, workerPool)
 
 	// Create services.
 	runner := exec.NewRunner(sb)
@@ -289,6 +300,7 @@ func runDaemon() error {
 	grpcServer.RegisterFileSystemService(sentinelgrpc.NewFileSystemService(fsSvc))
 	grpcServer.RegisterSessionService(sentinelgrpc.NewSessionService(sessionMgr))
 	grpcServer.RegisterPayloadService(sentinelgrpc.NewPayloadService(payloadRegistry))
+	grpcServer.RegisterWorkerService(sentinelgrpc.NewWorkerService(workerPool))
 
 	logger.Info("starting gRPC server", "addr", grpcAddr)
 
@@ -309,42 +321,71 @@ func runDaemon() error {
 	}
 }
 
-func printStartupBanner(deviceID, grpcAddr, bootstrapAddr, phase string) {
+func printStartupBanner(deviceID, grpcAddr, bootstrapAddr, phase string, pool *worker.Pool) {
 	hostname, _ := os.Hostname()
 	localIPs := getLocalIPs()
 	publicIP := getPublicIP()
 
-	info := struct {
-		Name          string   `json:"name"`
-		Version       string   `json:"version"`
-		Hostname      string   `json:"hostname"`
-		OS            string   `json:"os"`
-		Arch          string   `json:"arch"`
-		GRPCAddr      string   `json:"grpc_addr"`
-		BootstrapAddr string   `json:"bootstrap_addr"`
-		Phase         string   `json:"phase"`
-		DeviceID      string   `json:"device_id"`
-		LocalIPs      []string `json:"local_ips"`
-		PublicIP       string   `json:"public_ip"`
-		StartedAt     string   `json:"started_at"`
-	}{
-		Name:          "sentinel",
-		Version:       version,
-		Hostname:      hostname,
-		OS:            runtime.GOOS,
-		Arch:          runtime.GOARCH,
-		GRPCAddr:      grpcAddr,
-		BootstrapAddr: bootstrapAddr,
-		Phase:         phase,
-		DeviceID:      deviceID,
-		LocalIPs:      localIPs,
-		PublicIP:      publicIP,
-		StartedAt:     time.Now().Format(time.RFC3339),
+	if serveJSON {
+		info := struct {
+			Name          string   `json:"name"`
+			Version       string   `json:"version"`
+			Hostname      string   `json:"hostname"`
+			OS            string   `json:"os"`
+			Arch          string   `json:"arch"`
+			GRPCAddr      string   `json:"grpc_addr"`
+			BootstrapAddr string   `json:"bootstrap_addr"`
+			Phase         string   `json:"phase"`
+			DeviceID      string   `json:"device_id"`
+			LocalIPs      []string `json:"local_ips"`
+			PublicIP      string   `json:"public_ip"`
+			StartedAt     string   `json:"started_at"`
+			ActiveWorkers int      `json:"active_workers"`
+			TotalWorkers  int      `json:"total_workers"`
+		}{
+			Name:          "sentinel",
+			Version:       version,
+			Hostname:      hostname,
+			OS:            runtime.GOOS,
+			Arch:          runtime.GOARCH,
+			GRPCAddr:      grpcAddr,
+			BootstrapAddr: bootstrapAddr,
+			Phase:         phase,
+			DeviceID:      deviceID,
+			LocalIPs:      localIPs,
+			PublicIP:      publicIP,
+			StartedAt:     time.Now().Format(time.RFC3339),
+			ActiveWorkers: pool.ActiveCount(),
+			TotalWorkers:  pool.TotalCount(),
+		}
+
+		enc := json.NewEncoder(os.Stderr)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(info)
+		return
 	}
 
-	enc := json.NewEncoder(os.Stderr)
-	enc.SetIndent("", "  ")
-	_ = enc.Encode(info)
+	// Default plain text output.
+	localIP := "(none)"
+	if len(localIPs) > 0 {
+		localIP = localIPs[0]
+	}
+
+	_, _ = fmt.Fprintf(os.Stderr, `sentinel %s
+hostname: %-20s os: %s/%s
+grpc:     %-20s bootstrap: %s
+device:   %s
+local:    %-20s public: %s
+phase:    %s
+workers:  %d active, %d total
+`, version,
+		hostname, runtime.GOOS, runtime.GOARCH,
+		grpcAddr, bootstrapAddr,
+		deviceID,
+		localIP, publicIP,
+		phase,
+		pool.ActiveCount(), pool.TotalCount(),
+	)
 }
 
 func getLocalIPs() []string {
