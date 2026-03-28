@@ -4,11 +4,17 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"syscall"
+	"time"
 
 	"github.com/inovacc/sentinel/internal/ca"
 	"github.com/inovacc/sentinel/internal/datadir"
@@ -119,6 +125,13 @@ func runDaemon() error {
 	deviceID, _ := ca.DeviceID(certPEM)
 	logger.Info("device identity loaded", "device_id", deviceID)
 
+	listenAddr := cfg.Listen.GRPC
+	if listenAddr == "" {
+		listenAddr = ":7400"
+	}
+
+	printStartupBanner(deviceID, listenAddr)
+
 	// Initialize sandbox.
 	sandboxRoot := cfg.Sandbox.Root
 	if sandboxRoot == "" {
@@ -176,11 +189,6 @@ func runDaemon() error {
 	grpcServer.RegisterFileSystemService(sentinelgrpc.NewFileSystemService(fsSvc))
 	grpcServer.RegisterSessionService(sentinelgrpc.NewSessionService(sessionMgr))
 
-	listenAddr := cfg.Listen.GRPC
-	if listenAddr == "" {
-		listenAddr = ":7400"
-	}
-
 	logger.Info("starting gRPC server", "addr", listenAddr)
 
 	// Start server in goroutine.
@@ -198,6 +206,87 @@ func runDaemon() error {
 	case err := <-errCh:
 		return fmt.Errorf("gRPC server: %w", err)
 	}
+}
+
+func printStartupBanner(deviceID, listenAddr string) {
+	hostname, _ := os.Hostname()
+	localIPs := getLocalIPs()
+	publicIP := getPublicIP()
+
+	w := os.Stderr
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "  ┌──────────────────────────────────────────────────────────────────┐")
+	fmt.Fprintln(w, "  │                    S E N T I N E L                               │")
+	fmt.Fprintln(w, "  │           Secure Remote REPL for Claude Code                     │")
+	fmt.Fprintln(w, "  ├──────────────────────────────────────────────────────────────────┤")
+	fmt.Fprintf(w,  "  │  Hostname:    %-50s│\n", hostname)
+	fmt.Fprintf(w,  "  │  OS/Arch:     %-50s│\n", runtime.GOOS+"/"+runtime.GOARCH)
+	fmt.Fprintf(w,  "  │  Version:     %-50s│\n", version)
+	fmt.Fprintf(w,  "  │  Listen:      %-50s│\n", listenAddr)
+	fmt.Fprintln(w, "  ├──────────────────────────────────────────────────────────────────┤")
+	fmt.Fprintf(w,  "  │  Device ID:   %-50s│\n", truncateID(deviceID, 50))
+	fmt.Fprintln(w, "  ├──────────────────────────────────────────────────────────────────┤")
+	for i, ip := range localIPs {
+		label := "Local IP:"
+		if i > 0 {
+			label = "         "
+		}
+		fmt.Fprintf(w, "  │  %-12s %-50s│\n", label, ip)
+	}
+	if len(localIPs) == 0 {
+		fmt.Fprintf(w, "  │  %-12s %-50s│\n", "Local IP:", "(none detected)")
+	}
+	fmt.Fprintf(w,  "  │  %-12s %-50s│\n", "Public IP:", publicIP)
+	fmt.Fprintln(w, "  ├──────────────────────────────────────────────────────────────────┤")
+	fmt.Fprintf(w,  "  │  Started:     %-50s│\n", time.Now().Format("2006-01-02 15:04:05 MST"))
+	fmt.Fprintln(w, "  └──────────────────────────────────────────────────────────────────┘")
+	fmt.Fprintln(w)
+}
+
+func getLocalIPs() []string {
+	var ips []string
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return ips
+	}
+	for _, addr := range addrs {
+		if ipNet, ok := addr.(*net.IPNet); ok && !ipNet.IP.IsLoopback() && ipNet.IP.To4() != nil {
+			ips = append(ips, ipNet.IP.String())
+		}
+	}
+	return ips
+}
+
+func getPublicIP() string {
+	client := &http.Client{Timeout: 3 * time.Second}
+	endpoints := []string{
+		"https://api.ipify.org",
+		"https://ifconfig.me/ip",
+		"https://icanhazip.com",
+	}
+	for _, url := range endpoints {
+		resp, err := client.Get(url)
+		if err != nil {
+			continue
+		}
+		body, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if err != nil {
+			continue
+		}
+		ip := strings.TrimSpace(string(body))
+		if net.ParseIP(ip) != nil {
+			return ip
+		}
+	}
+	return "(unavailable)"
+}
+
+func truncateID(id string, max int) string {
+	if len(id) <= max {
+		return id
+	}
+	return id[:max-3] + "..."
 }
 
 func parseLogLevel(level string) slog.Level {
