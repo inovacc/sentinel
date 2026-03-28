@@ -214,33 +214,36 @@ func printStartupBanner(deviceID, listenAddr string) {
 	publicIP := getPublicIP()
 
 	w := os.Stderr
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "  ┌──────────────────────────────────────────────────────────────────┐")
-	fmt.Fprintln(w, "  │                    S E N T I N E L                               │")
-	fmt.Fprintln(w, "  │           Secure Remote REPL for Claude Code                     │")
-	fmt.Fprintln(w, "  ├──────────────────────────────────────────────────────────────────┤")
-	fmt.Fprintf(w,  "  │  Hostname:    %-50s│\n", hostname)
-	fmt.Fprintf(w,  "  │  OS/Arch:     %-50s│\n", runtime.GOOS+"/"+runtime.GOARCH)
-	fmt.Fprintf(w,  "  │  Version:     %-50s│\n", version)
-	fmt.Fprintf(w,  "  │  Listen:      %-50s│\n", listenAddr)
-	fmt.Fprintln(w, "  ├──────────────────────────────────────────────────────────────────┤")
-	fmt.Fprintf(w,  "  │  Device ID:   %-50s│\n", truncateID(deviceID, 50))
-	fmt.Fprintln(w, "  ├──────────────────────────────────────────────────────────────────┤")
+	p := func(format string, a ...any) { _, _ = fmt.Fprintf(w, format, a...) }
+	ln := func(a ...any) { _, _ = fmt.Fprintln(w, a...) }
+
+	ln()
+	ln("  ┌──────────────────────────────────────────────────────────────────┐")
+	ln("  │                    S E N T I N E L                               │")
+	ln("  │           Secure Remote REPL for Claude Code                     │")
+	ln("  ├──────────────────────────────────────────────────────────────────┤")
+	p("  │  Hostname:    %-50s│\n", hostname)
+	p("  │  OS/Arch:     %-50s│\n", runtime.GOOS+"/"+runtime.GOARCH)
+	p("  │  Version:     %-50s│\n", version)
+	p("  │  Listen:      %-50s│\n", listenAddr)
+	ln("  ├──────────────────────────────────────────────────────────────────┤")
+	p("  │  Device ID:   %-50s│\n", truncateID(deviceID, 50))
+	ln("  ├──────────────────────────────────────────────────────────────────┤")
 	for i, ip := range localIPs {
 		label := "Local IP:"
 		if i > 0 {
 			label = "         "
 		}
-		fmt.Fprintf(w, "  │  %-12s %-50s│\n", label, ip)
+		p("  │  %-12s %-50s│\n", label, ip)
 	}
 	if len(localIPs) == 0 {
-		fmt.Fprintf(w, "  │  %-12s %-50s│\n", "Local IP:", "(none detected)")
+		p("  │  %-12s %-50s│\n", "Local IP:", "(none detected)")
 	}
-	fmt.Fprintf(w,  "  │  %-12s %-50s│\n", "Public IP:", publicIP)
-	fmt.Fprintln(w, "  ├──────────────────────────────────────────────────────────────────┤")
-	fmt.Fprintf(w,  "  │  Started:     %-50s│\n", time.Now().Format("2006-01-02 15:04:05 MST"))
-	fmt.Fprintln(w, "  └──────────────────────────────────────────────────────────────────┘")
-	fmt.Fprintln(w)
+	p("  │  %-12s %-50s│\n", "Public IP:", publicIP)
+	ln("  ├──────────────────────────────────────────────────────────────────┤")
+	p("  │  Started:     %-50s│\n", time.Now().Format("2006-01-02 15:04:05 MST"))
+	ln("  └──────────────────────────────────────────────────────────────────┘")
+	ln()
 }
 
 func getLocalIPs() []string {
