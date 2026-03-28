@@ -162,6 +162,16 @@ func (m *Manager) Phase() Phase {
 	return m.phase
 }
 
+// DeviceKeyPEM returns the current device private key PEM.
+func (m *Manager) DeviceKeyPEM() []byte {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if len(m.cfg.DeviceKeyPEM) > 0 {
+		return m.cfg.DeviceKeyPEM
+	}
+	return m.cfg.BootstrapKeyPEM
+}
+
 // DeviceID returns the current device ID (bootstrap or mTLS depending on phase).
 func (m *Manager) DeviceID() string {
 	m.mu.RLock()

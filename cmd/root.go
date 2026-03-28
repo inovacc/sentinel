@@ -27,6 +27,7 @@ func init() {
 	rootCmd.AddCommand(
 		newServeCmd(),
 		newServerCmd(),
+		newBootstrapCmd(),
 		newPairCmd(),
 		newFleetCmd(),
 		newExecCmd(),
