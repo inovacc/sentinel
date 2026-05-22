@@ -75,3 +75,34 @@ jobs:
             --recursive
             --skip-git
             ./
+
+  fuzz:
+    name: protocol fuzzing (nightly)
+    # Only run on schedule; on PRs the 60s smoke is part of test suite.
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      - name: Fuzz DecodeEnvelope (30 minutes)
+        run: go test ./pkg/transport/ -run='^$' -fuzz=FuzzDecodeEnvelope -fuzztime=30m
+      - name: Upload corpus on crash
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-corpus-${{ github.run_id }}
+          path: pkg/transport/testdata/fuzz/
+
+  fuzz-smoke:
+    name: protocol fuzzing (PR smoke 60s)
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      - name: Smoke fuzz DecodeEnvelope
+        run: go test ./pkg/transport/ -run='^$' -fuzz=FuzzDecodeEnvelope -fuzztime=60s

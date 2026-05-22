@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
-	"io"
 	"log/slog"
 	"math/big"
 	"net"
@@ -498,30 +497,9 @@ func writeMessage(conn net.Conn, msgType MessageType, payload any) error {
 }
 
 // readEnvelope reads a length-prefixed envelope from the connection.
+// Delegates wire parsing to DecodeEnvelope so the parser is fuzz-testable.
 func readEnvelope(conn net.Conn) (*Envelope, error) {
-	header := make([]byte, 4)
-	if _, err := io.ReadFull(conn, header); err != nil {
-		return nil, fmt.Errorf("transport: read header: %w", err)
-	}
-
-	length := uint32(header[0])<<24 | uint32(header[1])<<16 | uint32(header[2])<<8 | uint32(header[3])
-
-	// Sanity check: max 10MB.
-	if length > 10*1024*1024 {
-		return nil, fmt.Errorf("transport: message too large: %d bytes", length)
-	}
-
-	data := make([]byte, length)
-	if _, err := io.ReadFull(conn, data); err != nil {
-		return nil, fmt.Errorf("transport: read payload: %w", err)
-	}
-
-	var env Envelope
-	if err := json.Unmarshal(data, &env); err != nil {
-		return nil, fmt.Errorf("transport: unmarshal envelope: %w", err)
-	}
-
-	return &env, nil
+	return DecodeEnvelope(conn)
 }
 
 // readTypedMessage reads an envelope and decodes its payload as the expected type.

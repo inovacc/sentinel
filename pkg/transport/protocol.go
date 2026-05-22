@@ -5,8 +5,13 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"time"
 )
+
+// MaxEnvelopeSize is the maximum allowed length-prefixed envelope size on the wire.
+// Anything larger is rejected before allocation to prevent memory-exhaustion DoS.
+const MaxEnvelopeSize = 10 * 1024 * 1024 // 10 MiB
 
 // Bootstrap protocol messages exchanged over the Syncthing-key TLS connection.
 // All messages are length-prefixed JSON.
@@ -56,6 +61,35 @@ func NewEnvelope(msgType MessageType, payload any) (*Envelope, error) {
 // DecodePayload unmarshals the envelope payload into the target.
 func (e *Envelope) DecodePayload(target any) error {
 	return json.Unmarshal(e.Payload, target)
+}
+
+// DecodeEnvelope reads a single length-prefixed envelope from r and returns it.
+// Wire format: 4-byte big-endian length, then that many bytes of JSON-encoded Envelope.
+// Rejects lengths > MaxEnvelopeSize before allocating, to bound memory use against
+// hostile peers. This is the fuzzable entry point for the bootstrap protocol parser.
+func DecodeEnvelope(r io.Reader) (*Envelope, error) {
+	header := make([]byte, 4)
+	if _, err := io.ReadFull(r, header); err != nil {
+		return nil, fmt.Errorf("transport: read header: %w", err)
+	}
+
+	length := uint32(header[0])<<24 | uint32(header[1])<<16 | uint32(header[2])<<8 | uint32(header[3])
+
+	if length > MaxEnvelopeSize {
+		return nil, fmt.Errorf("transport: message too large: %d bytes", length)
+	}
+
+	data := make([]byte, length)
+	if _, err := io.ReadFull(r, data); err != nil {
+		return nil, fmt.Errorf("transport: read payload: %w", err)
+	}
+
+	var env Envelope
+	if err := json.Unmarshal(data, &env); err != nil {
+		return nil, fmt.Errorf("transport: unmarshal envelope: %w", err)
+	}
+
+	return &env, nil
 }
 
 // --- Protocol Messages ---
