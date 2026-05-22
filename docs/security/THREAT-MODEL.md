@@ -37,7 +37,7 @@ Status: ✅ implemented, 🟡 partial, ❌ not yet (becomes Phase 3 work).
 | T1.1 | S | Attacker impersonates a legitimate device during bootstrap | H | Device-ID is SHA-256 of self-signed leaf cert; operator must approve the device ID out-of-band before signing | `pkg/transport/bootstrap.go`, `internal/ca/identity.go` | `pkg/transport/bootstrap_test.go` | ✅ |
 | T1.2 | T | Attacker intercepts cert-signing handshake (MITM) and substitutes their own CSR | H | Operator confirms device-ID hash on both ends before approving sign request | bootstrap CLI flow | manual UAT | 🟡 — UX-dependent; threat model documents the required operator step |
 | T1.3 | D | Attacker floods bootstrap port to exhaust connections / TLS handshakes | M | Per-IP rate limit on bootstrap port; bootstrap port only open during `--renew-certs` or initial pair window | rate limiter (Phase 3.2) | TBD | ❌ → Phase 3.2 |
-| T1.4 | E | Attacker exploits parser bug in length-prefixed JSON protocol to gain RCE in daemon | C | Strict max message size; native Go fuzz tests on `pkg/transport/protocol.go` | `pkg/transport/protocol.go` | `pkg/transport/protocol_fuzz_test.go` (Phase 2b) | ❌ → Phase 2b |
+| T1.4 | E | Attacker exploits parser bug in length-prefixed JSON protocol to gain RCE in daemon | C | Strict max message size (`MaxEnvelopeSize` = 10 MiB); native Go fuzz tests on `DecodeEnvelope` | `pkg/transport/protocol.go` | `pkg/transport/protocol_fuzz_test.go` | ✅ |
 | T1.5 | I | Bootstrap leaks device fingerprint info pre-auth | L | Self-signed cert only exposes device-ID, no further metadata | bootstrap protocol | bootstrap_test.go | ✅ |
 
 ### TB2 — mTLS port 7400
