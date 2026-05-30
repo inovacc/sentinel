@@ -17,10 +17,18 @@ import (
 
 // HealthMonitor periodically checks fleet device health.
 type HealthMonitor struct {
-	registry *Registry
-	certDir  string
-	logger   *slog.Logger
-	interval time.Duration
+	registry        *Registry
+	certDir         string
+	logger          *slog.Logger
+	interval        time.Duration
+	onDeviceOffline func(deviceID string)
+}
+
+// SetOnDeviceOffline registers a callback invoked when a device transitions to
+// offline because it became unreachable. Set it before Start; it is called from
+// the monitor goroutine.
+func (h *HealthMonitor) SetOnDeviceOffline(fn func(deviceID string)) {
+	h.onDeviceOffline = fn
 }
 
 // NewHealthMonitor creates a health monitor that pings fleet devices on an interval.
@@ -85,6 +93,9 @@ func (h *HealthMonitor) checkAll(ctx context.Context) {
 					"device_id", d.DeviceID,
 					"error", err,
 				)
+			}
+			if h.onDeviceOffline != nil {
+				h.onDeviceOffline(d.DeviceID)
 			}
 		} else {
 			h.logger.Debug("health check: device healthy",

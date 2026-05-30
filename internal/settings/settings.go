@@ -84,6 +84,11 @@ type DiscoveryConfig struct {
 	// pairing still requires approval, so discovery only makes the server
 	// findable. Disable on untrusted networks.
 	Enabled bool `yaml:"enabled"`
+	// WindowSeconds is how long the daemon advertises after each trigger
+	// (startup and every lost connection) before going quiet again. Keeping
+	// the window short limits how long the instance is broadcast on the LAN.
+	// Defaults to 300 (5 minutes).
+	WindowSeconds int `yaml:"window_seconds"`
 }
 
 // DefaultConfig returns a config with sensible defaults.
@@ -128,7 +133,8 @@ func DefaultConfig() *Config {
 			MaxFiles:  5,
 		},
 		Discovery: DiscoveryConfig{
-			Enabled: true,
+			Enabled:       true,
+			WindowSeconds: 300,
 		},
 	}
 }

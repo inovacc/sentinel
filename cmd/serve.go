@@ -98,6 +98,8 @@ type daemon struct {
 	metricsAddr   string
 
 	discoveryEnabled bool
+	discoveryWindow  time.Duration
+	discoveryBeacon  *discovery.Beacon
 
 	cleanups []func()
 }
@@ -152,6 +154,11 @@ func buildDaemon(ctx context.Context) (*daemon, error) {
 	d.bootstrapAddr = orDefault(cfg.Listen.Bootstrap, ":7399")
 	d.metricsAddr = orDefault(cfg.Listen.Metrics, ":7401")
 	d.discoveryEnabled = cfg.Discovery.Enabled
+	windowSec := cfg.Discovery.WindowSeconds
+	if windowSec <= 0 {
+		windowSec = 300
+	}
+	d.discoveryWindow = time.Duration(windowSec) * time.Second
 
 	db, err := sql.Open("sqlite", datadir.DBPath())
 	if err != nil {
@@ -288,30 +295,7 @@ func buildTransport(cfg *settings.Config, authority *ca.CA, certPEM, keyPEM []by
 func (d *daemon) serve(ctx context.Context) error {
 	logger := d.logger
 
-	// Start bootstrap listener for device pairing (regardless of mTLS state).
-	if err := d.transportMgr.StartBootstrapOnly(ctx); err != nil {
-		logger.Warn("could not start bootstrap port", "error", err)
-	} else {
-		d.addCleanup(func() { d.transportMgr.Stop() })
-		bs := transport.NewBootstrapServer(d.transportMgr, version)
-		go func() {
-			if err := bs.Serve(ctx); err != nil && !errors.Is(err, context.Canceled) {
-				logger.Error("bootstrap server stopped", "error", err)
-			}
-		}()
-		logger.Info("bootstrap server started for pairing", "addr", d.bootstrapAddr)
-
-		// Announce on the LAN so clients can find us with `sentinel discover`.
-		// Best-effort: a failure (e.g. multicast blocked) must not stop the daemon.
-		if d.discoveryEnabled {
-			if adv, err := startDiscoveryAdvertiser(logger, d.deviceID, d.bootstrapAddr); err != nil {
-				logger.Warn("could not start mDNS discovery", "error", err)
-			} else {
-				d.addCleanup(adv.Stop)
-				logger.Info("mDNS discovery advertising", "service", "_sentinel._tcp", "addr", d.bootstrapAddr)
-			}
-		}
-	}
+	d.startPairing(ctx)
 
 	phase := "mtls"
 	if d.transportMgr.BootstrapListener() != nil {
@@ -322,6 +306,14 @@ func (d *daemon) serve(ctx context.Context) error {
 	startHeartbeatMonitor(ctx, d.sessionMgr, logger)
 
 	healthMonitor := fleet.NewHealthMonitor(d.registry, d.certDir, logger, 60*time.Second)
+	if d.discoveryBeacon != nil {
+		// A lost connection re-opens the discovery window so the peer can find
+		// us again when it comes back.
+		healthMonitor.SetOnDeviceOffline(func(deviceID string) {
+			logger.Info("discovery: re-advertising after lost connection", "device_id", deviceID)
+			d.discoveryBeacon.Trigger()
+		})
+	}
 	go healthMonitor.Start(ctx)
 
 	metricsServer := startMetricsServer(logger, d.metricsAddr, d.workerPool)
@@ -476,10 +468,45 @@ func startMetricsServer(logger *slog.Logger, addr string, pool *worker.Pool) *ht
 	return srv
 }
 
-// startDiscoveryAdvertiser announces this daemon on the LAN via mDNS so peers
-// can find it with `sentinel discover`. The bootstrap port is advertised
-// because that is the entry point an unpaired client connects to.
-func startDiscoveryAdvertiser(logger *slog.Logger, deviceID, bootstrapAddr string) (*discovery.Advertiser, error) {
+// startPairing starts the bootstrap listener (the device-pairing entry point)
+// and, when discovery is enabled, the LAN mDNS beacon. Both are best-effort: a
+// failure is logged but never stops the daemon.
+func (d *daemon) startPairing(ctx context.Context) {
+	logger := d.logger
+
+	if err := d.transportMgr.StartBootstrapOnly(ctx); err != nil {
+		logger.Warn("could not start bootstrap port", "error", err)
+		return
+	}
+	d.addCleanup(func() { d.transportMgr.Stop() })
+
+	bs := transport.NewBootstrapServer(d.transportMgr, version)
+	go func() {
+		if err := bs.Serve(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			logger.Error("bootstrap server stopped", "error", err)
+		}
+	}()
+	logger.Info("bootstrap server started for pairing", "addr", d.bootstrapAddr)
+
+	if !d.discoveryEnabled {
+		return
+	}
+	beacon, err := startDiscoveryBeacon(logger, d.deviceID, d.bootstrapAddr, d.discoveryWindow)
+	if err != nil {
+		logger.Warn("could not start mDNS discovery", "error", err)
+		return
+	}
+	d.discoveryBeacon = beacon
+	d.addCleanup(beacon.Close)
+	logger.Info("mDNS discovery enabled",
+		"service", "_sentinel._tcp", "addr", d.bootstrapAddr, "window", d.discoveryWindow.String())
+}
+
+// startDiscoveryBeacon builds the mDNS advertiser and wraps it in a Beacon that
+// advertises in time-boxed windows. The bootstrap port is advertised because it
+// is the entry point an unpaired client connects to. The initial window opens
+// immediately; callers re-open it via Beacon.Trigger.
+func startDiscoveryBeacon(logger *slog.Logger, deviceID, bootstrapAddr string, window time.Duration) (*discovery.Beacon, error) {
 	_, portStr, err := net.SplitHostPort(bootstrapAddr)
 	if err != nil {
 		return nil, fmt.Errorf("parse bootstrap addr %q: %w", bootstrapAddr, err)
@@ -493,10 +520,9 @@ func startDiscoveryAdvertiser(logger *slog.Logger, deviceID, bootstrapAddr strin
 	if err != nil {
 		return nil, err
 	}
-	if err := adv.Start(); err != nil {
-		return nil, err
-	}
-	return adv, nil
+	beacon := discovery.NewBeacon(adv, window, logger)
+	beacon.Trigger() // open the initial advertising window
+	return beacon, nil
 }
 
 // registerServices registers every gRPC service on the server.
