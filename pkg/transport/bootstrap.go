@@ -109,13 +109,13 @@ func (bs *BootstrapServer) handleConn(ctx context.Context, conn net.Conn) {
 	// --- Step 1: Exchange Hello ---
 	// Use bootstrap device ID (matches the self-signed TLS cert on this port).
 	hello := HelloMessage{
-		DeviceID:  bs.manager.BootstrapDeviceID(),
-		Hostname:  bs.hostname,
-		OS:        runtime.GOOS,
-		Arch:      runtime.GOARCH,
-		Version:   bs.version,
-		HasCA:     bs.manager.cfg.CA != nil,
-		HasMTLS:   bs.manager.hasMTLSCerts(),
+		DeviceID: bs.manager.BootstrapDeviceID(),
+		Hostname: bs.hostname,
+		OS:       runtime.GOOS,
+		Arch:     runtime.GOARCH,
+		Version:  bs.version,
+		HasCA:    bs.manager.cfg.CA != nil,
+		HasMTLS:  bs.manager.hasMTLSCerts(),
 	}
 
 	if err := writeMessage(conn, MsgHello, hello); err != nil {
@@ -140,10 +140,12 @@ func (bs *BootstrapServer) handleConn(ctx context.Context, conn net.Conn) {
 		bs.logger.Error("bootstrap: device ID mismatch",
 			"hello_id", peerHello.DeviceID,
 			"cert_id", peerDeviceID)
-		_ = writeMessage(conn, MsgError, ErrorMessage{
+		if err := writeMessage(conn, MsgError, ErrorMessage{
 			Code:    "device_id_mismatch",
 			Message: "hello device ID does not match TLS certificate",
-		})
+		}); err != nil {
+			bs.logger.Debug("bootstrap: send error notice failed", "error", err)
+		}
 		return
 	}
 
@@ -156,7 +158,9 @@ func (bs *BootstrapServer) handleConn(ctx context.Context, conn net.Conn) {
 				reason = err.Error()
 			}
 			bs.logger.Info("bootstrap: peer rejected", "device_id", peerHello.DeviceID, "reason", reason)
-			_ = writeMessage(conn, MsgReject, RejectMessage{Reason: reason})
+			if err := writeMessage(conn, MsgReject, RejectMessage{Reason: reason}); err != nil {
+				bs.logger.Debug("bootstrap: send reject failed", "error", err)
+			}
 			return
 		}
 	}
@@ -180,10 +184,15 @@ func (bs *BootstrapServer) handleConn(ctx context.Context, conn net.Conn) {
 	}
 
 	// --- Step 4: Send complete ---
-	_ = writeMessage(conn, MsgComplete, CompleteMessage{
+	// This is the final success message. If the peer never receives it, it will
+	// not transition to mTLS, so we must not record it as a trusted peer.
+	if err := writeMessage(conn, MsgComplete, CompleteMessage{
 		MTLSAddr: bs.manager.cfg.MTLSAddr,
 		DeviceID: bs.manager.DeviceID(),
-	})
+	}); err != nil {
+		bs.logger.Error("bootstrap: send complete", "error", err, "peer_device_id", peerHello.DeviceID)
+		return
+	}
 
 	// Record trusted peer.
 	bs.manager.AddTrustedPeer(peerHello.DeviceID, peerCertPEM)
@@ -227,8 +236,8 @@ func (bs *BootstrapServer) signAndExchangeCerts(conn net.Conn, peerHello *HelloM
 	// Send signed cert back.
 	resp := CertResponseMessage{
 		SignedCertPEM: string(signedCert),
-		CACertPEM:    string(bs.manager.cfg.CA.RootCertPEM()),
-		AssignedRole: role,
+		CACertPEM:     string(bs.manager.cfg.CA.RootCertPEM()),
+		AssignedRole:  role,
 	}
 
 	if err := writeMessage(conn, MsgCertResponse, resp); err != nil {

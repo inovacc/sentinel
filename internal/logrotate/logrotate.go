@@ -1,6 +1,7 @@
 package logrotate
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -75,15 +76,21 @@ func (w *Writer) rotate() error {
 		return fmt.Errorf("close current: %w", err)
 	}
 
-	// Remove the oldest rotated file if it exceeds maxFiles.
+	// Remove the oldest rotated file if it exceeds maxFiles. A missing file is
+	// expected before maxFiles rotations have accumulated; any other error is fatal.
 	oldest := fmt.Sprintf("%s.%d", w.path, w.maxFiles)
-	_ = os.Remove(oldest)
+	if err := os.Remove(oldest); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove oldest %s: %w", oldest, err)
+	}
 
-	// Shift existing rotated files.
+	// Shift existing rotated files (.1 -> .2, ...). A missing source is expected;
+	// any other error means rotation numbering would silently corrupt.
 	for i := w.maxFiles - 1; i >= 1; i-- {
 		src := fmt.Sprintf("%s.%d", w.path, i)
 		dst := fmt.Sprintf("%s.%d", w.path, i+1)
-		_ = os.Rename(src, dst)
+		if err := os.Rename(src, dst); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("shift %s -> %s: %w", src, dst, err)
+		}
 	}
 
 	// Rename current to .1

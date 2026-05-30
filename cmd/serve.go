@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -306,7 +307,9 @@ func runDaemon() error {
 		defer transportMgr.Stop()
 		bs := transport.NewBootstrapServer(transportMgr, version)
 		go func() {
-			_ = bs.Serve(ctx)
+			if err := bs.Serve(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				logger.Error("bootstrap server stopped", "error", err)
+			}
 		}()
 		logger.Info("bootstrap server started for pairing", "addr", bootstrapAddr)
 	}

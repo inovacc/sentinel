@@ -107,7 +107,9 @@ func NewPool(db *sql.DB, sb *sandbox.Sandbox, opts ...Option) (*Pool, error) {
 	}
 
 	// Mark any previously running workers as stale (crash recovery).
-	_, _ = p.db.Exec(`UPDATE workers SET status = ? WHERE status = ?`, string(StatusStale), string(StatusRunning))
+	if _, err := p.db.Exec(`UPDATE workers SET status = ? WHERE status = ?`, string(StatusStale), string(StatusRunning)); err != nil {
+		p.logger.Warn("worker: mark running workers stale on startup failed", "error", err)
+	}
 
 	// Start reaper goroutine.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -453,13 +455,15 @@ CREATE INDEX IF NOT EXISTS idx_workers_status ON workers(status);
 func (p *Pool) insertWorker(w *Worker) {
 	argsJSON, _ := json.Marshal(w.Args)
 	metaJSON, _ := json.Marshal(w.Metadata)
-	_, _ = p.db.Exec(
+	if _, err := p.db.Exec(
 		`INSERT OR REPLACE INTO workers (id, command, args, pid, status, created_at, started_at, finished_at, stdout, stderr, exit_code, session_id, metadata)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		w.ID, w.Command, string(argsJSON), w.PID, string(w.Status),
 		w.CreatedAt.Unix(), w.StartedAt.Unix(), nil,
 		w.Stdout, w.Stderr, w.ExitCode, w.SessionID, string(metaJSON),
-	)
+	); err != nil {
+		p.logger.Error("worker: persist insert failed", "worker_id", w.ID, "error", err)
+	}
 }
 
 func (p *Pool) updateWorker(w *Worker) {
@@ -468,10 +472,12 @@ func (p *Pool) updateWorker(w *Worker) {
 		ts := w.FinishedAt.Unix()
 		finishedAt = &ts
 	}
-	_, _ = p.db.Exec(
+	if _, err := p.db.Exec(
 		`UPDATE workers SET status = ?, finished_at = ?, stdout = ?, stderr = ?, exit_code = ? WHERE id = ?`,
 		string(w.Status), finishedAt, w.Stdout, w.Stderr, w.ExitCode, w.ID,
-	)
+	); err != nil {
+		p.logger.Error("worker: persist update failed", "worker_id", w.ID, "error", err)
+	}
 }
 
 func (p *Pool) listFromDB(statusFilter Status) ([]Worker, error) {
@@ -509,8 +515,12 @@ func (p *Pool) getFromDB(id string) (*Worker, error) {
 	if err != nil {
 		return nil, fmt.Errorf("worker %s not found: %w", id, err)
 	}
-	_ = json.Unmarshal([]byte(argsJSON), &w.Args)
-	_ = json.Unmarshal([]byte(metaJSON), &w.Metadata)
+	if err := json.Unmarshal([]byte(argsJSON), &w.Args); err != nil {
+		p.logger.Warn("worker: decode persisted args failed", "worker_id", w.ID, "error", err)
+	}
+	if err := json.Unmarshal([]byte(metaJSON), &w.Metadata); err != nil {
+		p.logger.Warn("worker: decode persisted metadata failed", "worker_id", w.ID, "error", err)
+	}
 	w.CreatedAt = time.Unix(created, 0)
 	w.StartedAt = time.Unix(started, 0)
 	if finished != nil {
