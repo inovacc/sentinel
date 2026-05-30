@@ -62,6 +62,7 @@ func setupTestIdentity(dir string) error {
 	cfg.Listen.Bootstrap = "127.0.0.1:0"
 	cfg.Listen.Metrics = "127.0.0.1:0"
 	cfg.Sandbox.Root = filepath.Join(dir, "sandbox")
+	cfg.Discovery.Enabled = false // avoid binding mDNS multicast in tests
 	return settings.Save(datadir.ConfigPath(), cfg)
 }
 

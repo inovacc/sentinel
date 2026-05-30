@@ -10,14 +10,15 @@ import (
 
 // Config holds all sentinel configuration.
 type Config struct {
-	Device   DeviceConfig   `yaml:"device"`
-	Listen   ListenConfig   `yaml:"listen"`
-	Security SecurityConfig `yaml:"security"`
-	Sandbox  SandboxConfig  `yaml:"sandbox"`
-	Fleet    FleetConfig    `yaml:"fleet"`
-	Capture  CaptureConfig  `yaml:"capture"`
-	Session  SessionConfig  `yaml:"session"`
-	Logging  LoggingConfig  `yaml:"logging"`
+	Device    DeviceConfig    `yaml:"device"`
+	Listen    ListenConfig    `yaml:"listen"`
+	Security  SecurityConfig  `yaml:"security"`
+	Sandbox   SandboxConfig   `yaml:"sandbox"`
+	Fleet     FleetConfig     `yaml:"fleet"`
+	Capture   CaptureConfig   `yaml:"capture"`
+	Session   SessionConfig   `yaml:"session"`
+	Logging   LoggingConfig   `yaml:"logging"`
+	Discovery DiscoveryConfig `yaml:"discovery"`
 }
 
 type DeviceConfig struct {
@@ -75,6 +76,16 @@ type LoggingConfig struct {
 	MaxFiles  int    `yaml:"max_files"`
 }
 
+// DiscoveryConfig controls LAN service discovery. When enabled, the daemon
+// advertises itself via mDNS so peers can find it with `sentinel discover`.
+type DiscoveryConfig struct {
+	// Enabled announces this instance on the local network via mDNS.
+	// It broadcasts the (public) device ID, hostname, and bootstrap port;
+	// pairing still requires approval, so discovery only makes the server
+	// findable. Disable on untrusted networks.
+	Enabled bool `yaml:"enabled"`
+}
+
 // DefaultConfig returns a config with sensible defaults.
 func DefaultConfig() *Config {
 	return &Config{
@@ -115,6 +126,9 @@ func DefaultConfig() *Config {
 			Format:    "json",
 			MaxSizeMB: 50,
 			MaxFiles:  5,
+		},
+		Discovery: DiscoveryConfig{
+			Enabled: true,
 		},
 	}
 }

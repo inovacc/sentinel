@@ -16,12 +16,14 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/inovacc/sentinel/internal/ca"
 	"github.com/inovacc/sentinel/internal/datadir"
+	"github.com/inovacc/sentinel/internal/discovery"
 	"github.com/inovacc/sentinel/internal/exec"
 	"github.com/inovacc/sentinel/internal/fleet"
 	"github.com/inovacc/sentinel/internal/fs"
@@ -95,6 +97,8 @@ type daemon struct {
 	bootstrapAddr string
 	metricsAddr   string
 
+	discoveryEnabled bool
+
 	cleanups []func()
 }
 
@@ -147,6 +151,7 @@ func buildDaemon(ctx context.Context) (*daemon, error) {
 	d.grpcAddr = orDefault(cfg.Listen.GRPC, ":7400")
 	d.bootstrapAddr = orDefault(cfg.Listen.Bootstrap, ":7399")
 	d.metricsAddr = orDefault(cfg.Listen.Metrics, ":7401")
+	d.discoveryEnabled = cfg.Discovery.Enabled
 
 	db, err := sql.Open("sqlite", datadir.DBPath())
 	if err != nil {
@@ -295,6 +300,17 @@ func (d *daemon) serve(ctx context.Context) error {
 			}
 		}()
 		logger.Info("bootstrap server started for pairing", "addr", d.bootstrapAddr)
+
+		// Announce on the LAN so clients can find us with `sentinel discover`.
+		// Best-effort: a failure (e.g. multicast blocked) must not stop the daemon.
+		if d.discoveryEnabled {
+			if adv, err := startDiscoveryAdvertiser(logger, d.deviceID, d.bootstrapAddr); err != nil {
+				logger.Warn("could not start mDNS discovery", "error", err)
+			} else {
+				d.addCleanup(adv.Stop)
+				logger.Info("mDNS discovery advertising", "service", "_sentinel._tcp", "addr", d.bootstrapAddr)
+			}
+		}
 	}
 
 	phase := "mtls"
@@ -458,6 +474,29 @@ func startMetricsServer(logger *slog.Logger, addr string, pool *worker.Pool) *ht
 		}
 	}()
 	return srv
+}
+
+// startDiscoveryAdvertiser announces this daemon on the LAN via mDNS so peers
+// can find it with `sentinel discover`. The bootstrap port is advertised
+// because that is the entry point an unpaired client connects to.
+func startDiscoveryAdvertiser(logger *slog.Logger, deviceID, bootstrapAddr string) (*discovery.Advertiser, error) {
+	_, portStr, err := net.SplitHostPort(bootstrapAddr)
+	if err != nil {
+		return nil, fmt.Errorf("parse bootstrap addr %q: %w", bootstrapAddr, err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return nil, fmt.Errorf("parse bootstrap port %q: %w", portStr, err)
+	}
+	hostname, _ := os.Hostname()
+	adv, err := discovery.NewAdvertiser(deviceID, hostname, version, port, logger)
+	if err != nil {
+		return nil, err
+	}
+	if err := adv.Start(); err != nil {
+		return nil, err
+	}
+	return adv, nil
 }
 
 // registerServices registers every gRPC service on the server.

@@ -25,13 +25,16 @@ type DiscoveredDevice struct {
 type Advertiser struct {
 	deviceID string
 	hostname string
+	version  string
 	port     int
 	server   *mdns.Server
 	logger   *slog.Logger
 }
 
-// NewAdvertiser creates an mDNS advertiser for this sentinel instance.
-func NewAdvertiser(deviceID, hostname string, port int) (*Advertiser, error) {
+// NewAdvertiser creates an mDNS advertiser for this sentinel instance. The
+// version is published in the mDNS TXT record. A nil logger falls back to
+// slog.Default().
+func NewAdvertiser(deviceID, hostname, version string, port int, logger *slog.Logger) (*Advertiser, error) {
 	if deviceID == "" {
 		return nil, fmt.Errorf("discovery: device ID is required")
 	}
@@ -41,11 +44,15 @@ func NewAdvertiser(deviceID, hostname string, port int) (*Advertiser, error) {
 	if port <= 0 || port > 65535 {
 		return nil, fmt.Errorf("discovery: invalid port %d", port)
 	}
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &Advertiser{
 		deviceID: deviceID,
 		hostname: hostname,
+		version:  version,
 		port:     port,
-		logger:   slog.Default(),
+		logger:   logger,
 	}, nil
 }
 
@@ -56,17 +63,17 @@ func (a *Advertiser) Start() error {
 
 	info := []string{
 		"device_id=" + a.deviceID,
-		"version=" + version(),
+		"version=" + a.version,
 	}
 
 	service, err := mdns.NewMDNSService(
-		a.hostname,    // instance name
-		serviceName,   // service type
-		"",            // domain (default: local.)
-		"",            // host (auto-detect)
-		a.port,        // port
-		ips,           // IPs to announce
-		info,          // TXT records
+		a.hostname,  // instance name
+		serviceName, // service type
+		"",          // domain (default: local.)
+		"",          // host (auto-detect)
+		a.port,      // port
+		ips,         // IPs to announce
+		info,        // TXT records
 	)
 	if err != nil {
 		return fmt.Errorf("discovery: create mDNS service: %w", err)
@@ -191,10 +198,4 @@ func localIPv4s() []net.IP {
 		}
 	}
 	return ips
-}
-
-// version returns the build version. This is set via ldflags in production.
-// Falls back to "dev" if unset.
-func version() string {
-	return "dev"
 }
