@@ -39,6 +39,7 @@ func init() {
 		newCACmd(),
 		newMCPCmd(),
 		newDiscoverCmd(),
+		newConnectCmd(),
 		newDoctorCmd(),
 		newVersionCmd(),
 	)

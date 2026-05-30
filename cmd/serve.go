@@ -45,16 +45,26 @@ import (
 
 var serveJSON bool
 
+// serveDiscovery holds the --discovery flag override (nil when not set, so the
+// config value is used).
+var serveDiscovery *bool
+
 func newServeCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Start the sentinel daemon (foreground)",
-		Long:  `Starts the sentinel gRPC daemon in the foreground with mTLS authentication and bootstrap port for new device pairing.`,
+		Long:  `Starts the sentinel gRPC daemon in the foreground with mTLS authentication and bootstrap port for new device pairing. Initializes the CA and device identity on first run.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			serveDiscovery = nil
+			if cmd.Flags().Changed("discovery") {
+				v, _ := cmd.Flags().GetBool("discovery")
+				serveDiscovery = &v
+			}
 			return runDaemon()
 		},
 	}
 	cmd.Flags().BoolVar(&serveJSON, "json", false, "Output startup banner as JSON")
+	cmd.Flags().Bool("discovery", true, "Advertise on the LAN via mDNS (overrides config when set)")
 	return cmd
 }
 
@@ -141,6 +151,14 @@ func buildDaemon(ctx context.Context) (*daemon, error) {
 	}
 	d.addCleanup(func() { _ = serverinfo.RemovePID(datadir.Root()) })
 
+	// Create the CA + device identity on first run so `serve` works on a fresh
+	// machine with no separate `ca init` step.
+	if created, ierr := ensureIdentity(); ierr != nil {
+		return d, fmt.Errorf("ensure identity: %w", ierr)
+	} else if created {
+		logger.Info("initialized new CA and device identity")
+	}
+
 	authority, certPEM, keyPEM, certDir, deviceID, err := loadDeviceIdentity()
 	if err != nil {
 		return d, err
@@ -154,6 +172,9 @@ func buildDaemon(ctx context.Context) (*daemon, error) {
 	d.bootstrapAddr = orDefault(cfg.Listen.Bootstrap, ":7399")
 	d.metricsAddr = orDefault(cfg.Listen.Metrics, ":7401")
 	d.discoveryEnabled = cfg.Discovery.Enabled
+	if serveDiscovery != nil {
+		d.discoveryEnabled = *serveDiscovery
+	}
 	windowSec := cfg.Discovery.WindowSeconds
 	if windowSec <= 0 {
 		windowSec = 300
@@ -418,19 +439,25 @@ func buildOnPeerAccepted(logger *slog.Logger, registry *fleet.Registry, autoAcce
 			return true, nil
 		}
 
-		if err := registry.AddPending(&fleet.Device{
-			DeviceID: peerID,
-			CertPEM:  peerCert,
-			Role:     role,
-		}); err != nil {
-			logger.Error("failed to add pending device", "error", err)
-			return false, err
+		// Already approved on an earlier attempt — issue the certificate now.
+		if registry.IsTrusted(peerID) {
+			logger.Info("peer already approved, signing certificate", "device_id", peerID)
+			return true, nil
 		}
 
-		logger.Info("device added to pending list — use 'sentinel pair accept' to approve", "device_id", peerID)
-		// For now, auto-accept to complete the handshake.
-		// In production, this would wait for manual approval.
-		return true, nil
+		// New or still-pending peer: record it and reject this handshake. The
+		// admin approves with 'sentinel pair accept', then the peer reconnects.
+		if _, err := registry.Get(peerID); err != nil {
+			if aerr := registry.AddPending(&fleet.Device{
+				DeviceID: peerID,
+				CertPEM:  peerCert,
+				Role:     role,
+			}); aerr != nil {
+				logger.Error("failed to add pending device", "error", aerr)
+			}
+		}
+		logger.Info("peer pending manual approval", "device_id", peerID)
+		return false, fmt.Errorf("pending manual approval — run 'sentinel pair accept %s' on the server, then reconnect", peerID)
 	}
 }
 
