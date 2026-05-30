@@ -8,8 +8,13 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// CurrentConfigVersion is the schema version written by this build. Bump it
+// whenever the config layout changes and add a step to Config.Migrate.
+const CurrentConfigVersion = 1
+
 // Config holds all sentinel configuration.
 type Config struct {
+	Version   int             `yaml:"version"`
 	Device    DeviceConfig    `yaml:"device"`
 	Listen    ListenConfig    `yaml:"listen"`
 	Security  SecurityConfig  `yaml:"security"`
@@ -94,6 +99,7 @@ type DiscoveryConfig struct {
 // DefaultConfig returns a config with sensible defaults.
 func DefaultConfig() *Config {
 	return &Config{
+		Version: CurrentConfigVersion,
 		Listen: ListenConfig{
 			GRPC:      ":7400",
 			Bootstrap: ":7399",
@@ -190,4 +196,38 @@ func Save(path string, cfg *Config) error {
 		return fmt.Errorf("marshal config: %w", err)
 	}
 	return os.WriteFile(path, data, 0o600)
+}
+
+// OnDiskVersion returns the schema version recorded in the config file at path.
+// It returns 0 (and a nil error) when the file is missing or has no version
+// key — i.e. a pre-versioning config that should be migrated. A non-nil error
+// means the file exists but could not be read or parsed.
+func OnDiskVersion(path string) (int, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("read config: %w", err)
+	}
+	var probe struct {
+		Version int `yaml:"version"`
+	}
+	if err := yaml.Unmarshal(data, &probe); err != nil {
+		return 0, fmt.Errorf("parse config: %w", err)
+	}
+	return probe.Version, nil
+}
+
+// Migrate upgrades a loaded config to the current schema version in place,
+// returning true if anything changed. Fields absent from an older file already
+// receive defaults via Load; this stamps the version and is where future
+// field-level migrations (renames, moves) are added per version.
+func (c *Config) Migrate() bool {
+	changed := false
+	if c.Version < CurrentConfigVersion {
+		c.Version = CurrentConfigVersion
+		changed = true
+	}
+	return changed
 }
