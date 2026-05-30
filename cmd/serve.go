@@ -616,14 +616,8 @@ workers:  %d active, %d total
 
 func getLocalIPs() []string {
 	var ips []string
-	addrs, err := net.InterfaceAddrs()
-	if err != nil {
-		return ips
-	}
-	for _, addr := range addrs {
-		if ipNet, ok := addr.(*net.IPNet); ok && !ipNet.IP.IsLoopback() && ipNet.IP.To4() != nil {
-			ips = append(ips, ipNet.IP.String())
-		}
+	for _, ip := range discovery.LocalIPv4s() {
+		ips = append(ips, ip.String())
 	}
 	return ips
 }

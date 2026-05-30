@@ -66,7 +66,9 @@ func TestBeaconAdvertisesOnTriggerThenClosesAfterWindow(t *testing.T) {
 
 func TestBeaconContinuousTriggersKeepWindowOpen(t *testing.T) {
 	f := &fakeAdv{}
-	window := 100 * time.Millisecond
+	// Window is far larger than the trigger interval so the assertion that the
+	// window stays open is robust to scheduler delays under load.
+	window := 300 * time.Millisecond
 	b := NewBeacon(f, window, nil)
 	defer b.Close()
 

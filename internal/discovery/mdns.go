@@ -58,8 +58,8 @@ func NewAdvertiser(deviceID, hostname, version string, port int, logger *slog.Lo
 
 // Start begins advertising this sentinel instance via mDNS.
 func (a *Advertiser) Start() error {
-	// Get local IPs for the mDNS record.
-	ips := localIPv4s()
+	// Get the LAN IP(s) for the mDNS record.
+	ips := LocalIPv4s()
 
 	info := []string{
 		"device_id=" + a.deviceID,
@@ -186,16 +186,53 @@ func parseEntry(entry *mdns.ServiceEntry) DiscoveredDevice {
 	return dev
 }
 
-func localIPv4s() []net.IP {
+// LocalIPv4s returns the IPv4 address(es) to announce on the LAN. It prefers the
+// primary address — the source IP the OS uses for the default route, i.e. the
+// real LAN address — and falls back to every non-loopback, non-link-local IPv4
+// interface address when there is no default route. Link-local (169.254/16)
+// addresses are always excluded; they are not reachable LAN addresses.
+func LocalIPv4s() []net.IP {
+	if ip := primaryIPv4(); ip != nil {
+		return []net.IP{ip}
+	}
+
 	var ips []net.IP
 	addrs, err := net.InterfaceAddrs()
 	if err != nil {
 		return ips
 	}
 	for _, addr := range addrs {
-		if ipNet, ok := addr.(*net.IPNet); ok && !ipNet.IP.IsLoopback() && ipNet.IP.To4() != nil {
-			ips = append(ips, ipNet.IP)
+		ipNet, ok := addr.(*net.IPNet)
+		if !ok {
+			continue
 		}
+		ip := ipNet.IP.To4()
+		if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+			continue
+		}
+		ips = append(ips, ip)
 	}
 	return ips
+}
+
+// primaryIPv4 returns the preferred outbound IPv4 address — the source the OS
+// would use for the default route, which is the machine's primary LAN address.
+// No packets are sent; "dialing" a UDP address only resolves routing locally.
+// Returns nil when there is no usable default route.
+func primaryIPv4() net.IP {
+	conn, err := net.Dial("udp4", "8.8.8.8:80")
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = conn.Close() }()
+
+	ua, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		return nil
+	}
+	ip := ua.IP.To4()
+	if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+		return nil
+	}
+	return ip
 }

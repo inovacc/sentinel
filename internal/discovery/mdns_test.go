@@ -52,6 +52,22 @@ func TestNewAdvertiserNilLoggerDefaults(t *testing.T) {
 	}
 }
 
+func TestLocalIPv4sAreRoutable(t *testing.T) {
+	ips := LocalIPv4s()
+	t.Logf("LocalIPv4s() = %v", ips)
+	for _, ip := range ips {
+		if ip.To4() == nil {
+			t.Errorf("%v is not an IPv4 address", ip)
+		}
+		if ip.IsLoopback() {
+			t.Errorf("%v is loopback — must not be advertised", ip)
+		}
+		if ip.IsLinkLocalUnicast() {
+			t.Errorf("%v is link-local (169.254/16) — not a reachable LAN address", ip)
+		}
+	}
+}
+
 // TestAdvertiseScanRoundTrip starts an advertiser and confirms a scanner finds
 // it. It binds real mDNS multicast, so it is gated behind SENTINEL_TEST_MDNS to
 // keep the default `go test` run hermetic (and avoid host firewall prompts).
