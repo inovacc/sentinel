@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -21,13 +22,19 @@ type ExecServiceImpl struct {
 	v1.UnimplementedExecServiceServer
 	runner     *exec.Runner
 	sessionMgr *session.Manager // optional, may be nil
+	logger     *slog.Logger
 }
 
 // NewExecService creates an ExecService backed by the given runner.
 // sessionMgr is optional; when non-nil, exec calls with a session_id will
 // automatically create checkpoints before execution and record events after.
-func NewExecService(runner *exec.Runner, sessionMgr *session.Manager) *ExecServiceImpl {
-	return &ExecServiceImpl{runner: runner, sessionMgr: sessionMgr}
+// logger may be nil, in which case slog.Default() is used; it records failures
+// to persist session audit events so they are never silently dropped.
+func NewExecService(runner *exec.Runner, sessionMgr *session.Manager, logger *slog.Logger) *ExecServiceImpl {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &ExecServiceImpl{runner: runner, sessionMgr: sessionMgr, logger: logger}
 }
 
 // Exec executes a command and returns the result.
@@ -39,8 +46,8 @@ func (s *ExecServiceImpl) Exec(ctx context.Context, req *v1.ExecRequest) (*v1.Ex
 		cmdDesc := formatCommandDesc(req.GetCommand(), req.GetArgs())
 		_, cpErr := s.sessionMgr.CreateCheckpoint(ctx, sessionID, fmt.Sprintf("pre-exec: %s", cmdDesc), nil)
 		if cpErr != nil {
-			// Log but don't fail the exec — checkpoint is best-effort.
-			_ = cpErr
+			// Best-effort: don't fail the exec, but surface the failure.
+			s.logger.Warn("exec: pre-exec checkpoint failed", "session_id", sessionID, "error", cpErr)
 		}
 	}
 
@@ -53,7 +60,9 @@ func (s *ExecServiceImpl) Exec(ctx context.Context, req *v1.ExecRequest) (*v1.Ex
 				"args":    req.GetArgs(),
 				"error":   err.Error(),
 			})
-			_ = s.sessionMgr.AddEvent(ctx, sessionID, "error", eventData)
+			if evErr := s.sessionMgr.AddEvent(ctx, sessionID, "error", eventData); evErr != nil {
+				s.logger.Warn("exec: record error event failed", "session_id", sessionID, "error", evErr)
+			}
 		}
 		return nil, status.Errorf(codes.PermissionDenied, "%v", err)
 	}
@@ -65,7 +74,9 @@ func (s *ExecServiceImpl) Exec(ctx context.Context, req *v1.ExecRequest) (*v1.Ex
 			"args":      req.GetArgs(),
 			"exit_code": result.ExitCode,
 		})
-		_ = s.sessionMgr.AddEvent(ctx, sessionID, "command", eventData)
+		if evErr := s.sessionMgr.AddEvent(ctx, sessionID, "command", eventData); evErr != nil {
+			s.logger.Warn("exec: record command event failed", "session_id", sessionID, "error", evErr)
+		}
 	}
 
 	return &v1.ExecResponse{
@@ -93,7 +104,10 @@ func (s *ExecServiceImpl) ExecStream(req *v1.ExecRequest, stream v1.ExecService_
 		} else {
 			out.Stream = v1.ExecOutput_STDOUT
 		}
-		_ = stream.Send(out)
+		if err := stream.Send(out); err != nil {
+			// Client likely disconnected; log at debug to avoid noise.
+			s.logger.Debug("exec: stream send failed", "error", err)
+		}
 	}
 
 	result, err := s.runner.RunStream(stream.Context(), protoToRunRequest(req), onOutput)

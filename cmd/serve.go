@@ -341,7 +341,7 @@ func runDaemon() error {
 	payloadRegistry := payload.NewRegistry()
 
 	// Register services.
-	grpcServer.RegisterExecService(sentinelgrpc.NewExecService(runner, sessionMgr))
+	grpcServer.RegisterExecService(sentinelgrpc.NewExecService(runner, sessionMgr, logger))
 	grpcServer.RegisterFileSystemService(sentinelgrpc.NewFileSystemService(fsSvc, sessionMgr))
 	grpcServer.RegisterSessionService(sentinelgrpc.NewSessionService(sessionMgr))
 	grpcServer.RegisterPayloadService(sentinelgrpc.NewPayloadService(payloadRegistry))
