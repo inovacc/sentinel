@@ -61,6 +61,12 @@ func newCAInitCmd() *cobra.Command {
 			if err := os.WriteFile(filepath.Join(certDir, "device.key"), keyPEM, 0o600); err != nil {
 				return fmt.Errorf("write device key: %w", err)
 			}
+			// Also store the CA cert alongside the device cert so this machine has
+			// a complete mTLS identity (device cert + key + CA) and can act as a
+			// client of its own daemon without pairing.
+			if err := os.WriteFile(filepath.Join(certDir, "ca.crt"), authority.RootCertPEM(), 0o644); err != nil {
+				return fmt.Errorf("write CA cert to cert store: %w", err)
+			}
 
 			deviceID, err := ca.DeviceID(certPEM)
 			if err != nil {

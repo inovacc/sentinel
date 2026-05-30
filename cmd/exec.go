@@ -16,22 +16,33 @@ import (
 
 func newExecCmd() *cobra.Command {
 	execCmd := &cobra.Command{
-		Use:   "exec [device-id] [command...]",
-		Short: "Execute a command on a remote device",
-		Args:  cobra.MinimumNArgs(2),
+		Use:   "exec [target] <command> [args...]",
+		Short: "Execute a command on a sentinel daemon (local by default)",
+		Long: `Execute a command on a sentinel daemon.
+
+The optional leading target selects which daemon to run on; omit it for the
+local daemon:
+
+  sentinel exec go version                  # local daemon (this machine)
+  sentinel exec 192.168.1.5:7400 go test    # a remote address
+  sentinel exec <device-id> ls              # a paired device, by ID`,
+		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			deviceID := args[0]
-			command := args[1]
+			target, rest := client.SplitTarget(args)
+			if len(rest) == 0 {
+				return fmt.Errorf("no command specified")
+			}
+			command := rest[0]
 			var cmdArgs []string
-			if len(args) > 2 {
-				cmdArgs = args[2:]
+			if len(rest) > 1 {
+				cmdArgs = rest[1:]
 			}
 			stream, _ := cmd.Flags().GetBool("stream")
 			timeout, _ := cmd.Flags().GetInt("timeout")
 			workDir, _ := cmd.Flags().GetString("workdir")
 			bg, _ := cmd.Flags().GetBool("background")
 
-			return runExec(deviceID, command, cmdArgs, workDir, int32(timeout), stream, bg)
+			return runExec(target, command, cmdArgs, workDir, int32(timeout), stream, bg)
 		},
 	}
 
@@ -43,11 +54,11 @@ func newExecCmd() *cobra.Command {
 	return execCmd
 }
 
-func runExec(deviceID, command string, args []string, workDir string, timeout int32, stream, background bool) error {
-	// Resolve device address from fleet registry.
-	addr, err := client.ResolveDevice(deviceID, datadir.DBPath())
+func runExec(target, command string, args []string, workDir string, timeout int32, stream, background bool) error {
+	// Resolve the target to an address: local daemon, a host:port, or a device ID.
+	addr, err := client.ResolveAddress(target)
 	if err != nil {
-		return fmt.Errorf("resolve device: %w", err)
+		return fmt.Errorf("resolve target: %w", err)
 	}
 
 	// Connect via gRPC using mTLS certs.
