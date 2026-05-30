@@ -56,24 +56,288 @@ func newServeCmd() *cobra.Command {
 	return cmd
 }
 
+// runDaemon wires a cancellable signal context and runs the daemon until an
+// interrupt/terminate signal or a fatal server error.
 func runDaemon() error {
-	// Load configuration.
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	return runDaemonCtx(ctx)
+}
+
+// runDaemonCtx builds and serves the daemon under the given context. It is the
+// testable seam: callers can supply their own cancellable context. buildDaemon
+// always returns a (possibly partial) daemon so its acquired resources are torn
+// down here even when construction fails.
+func runDaemonCtx(ctx context.Context) error {
+	d, err := buildDaemon(ctx)
+	if d != nil {
+		defer d.cleanup()
+	}
+	if err != nil {
+		return err
+	}
+	return d.serve(ctx)
+}
+
+// daemon holds the wired components of a running sentinel daemon. It is
+// assembled by buildDaemon and driven by serve.
+type daemon struct {
+	logger       *slog.Logger
+	registry     *fleet.Registry
+	sessionMgr   *session.Manager
+	workerPool   *worker.Pool
+	transportMgr *transport.Manager
+	grpcServer   *sentinelgrpc.Server
+
+	certDir       string
+	deviceID      string
+	grpcAddr      string
+	bootstrapAddr string
+	metricsAddr   string
+
+	cleanups []func()
+}
+
+func (d *daemon) addCleanup(f func()) { d.cleanups = append(d.cleanups, f) }
+
+// cleanup runs registered teardown functions in reverse (LIFO) order.
+func (d *daemon) cleanup() {
+	for i := len(d.cleanups) - 1; i >= 0; i-- {
+		d.cleanups[i]()
+	}
+}
+
+// buildDaemon loads configuration and assembles every component the daemon
+// needs, without binding listening ports or starting the request loop. It
+// always returns a non-nil *daemon carrying any resources acquired so far, so
+// the caller can tear them down even on error.
+func buildDaemon(ctx context.Context) (*daemon, error) {
+	d := &daemon{}
+
 	cfg, err := settings.Load(datadir.ConfigPath())
 	if err != nil {
-		return fmt.Errorf("load config: %w", err)
+		return d, fmt.Errorf("load config: %w", err)
 	}
-
 	if err := cfg.Validate(); err != nil {
-		return fmt.Errorf("invalid config: %w", err)
+		return d, fmt.Errorf("invalid config: %w", err)
 	}
 
-	// Set up logging.
+	logger, logClose := setupLogging(cfg)
+	d.logger = logger
+	d.addCleanup(func() { _ = logClose() })
+	logger.Info("sentinel daemon starting", "version", version)
+
+	if err := os.MkdirAll(datadir.Root(), 0o700); err != nil {
+		return d, fmt.Errorf("create data dir: %w", err)
+	}
+	if err := serverinfo.WritePID(datadir.Root()); err != nil {
+		return d, fmt.Errorf("write PID: %w", err)
+	}
+	d.addCleanup(func() { _ = serverinfo.RemovePID(datadir.Root()) })
+
+	authority, certPEM, keyPEM, certDir, deviceID, err := loadDeviceIdentity()
+	if err != nil {
+		return d, err
+	}
+	d.certDir = certDir
+	d.deviceID = deviceID
+	logger.Info("device identity loaded", "device_id", deviceID)
+	warnCertExpiry(logger, certPEM)
+
+	d.grpcAddr = orDefault(cfg.Listen.GRPC, ":7400")
+	d.bootstrapAddr = orDefault(cfg.Listen.Bootstrap, ":7399")
+	d.metricsAddr = orDefault(cfg.Listen.Metrics, ":7401")
+
+	db, err := sql.Open("sqlite", datadir.DBPath())
+	if err != nil {
+		return d, fmt.Errorf("open database: %w", err)
+	}
+	d.addCleanup(func() { _ = db.Close() })
+
+	registry, sb, sessionMgr, err := openDataStores(db, cfg, logger)
+	if err != nil {
+		return d, err
+	}
+	d.registry = registry
+	d.sessionMgr = sessionMgr
+
+	if recovered, rerr := sessionMgr.RecoverInterrupted(ctx); rerr != nil {
+		logger.Warn("session recovery failed", "error", rerr)
+	} else if recovered > 0 {
+		logger.Info("recovered interrupted sessions", "count", recovered)
+	}
+
+	d.workerPool, err = worker.NewPool(db, sb, worker.WithLogger(logger))
+	if err != nil {
+		return d, fmt.Errorf("init worker pool: %w", err)
+	}
+	d.addCleanup(func() { d.workerPool.Stop() })
+
+	d.transportMgr, err = buildTransport(cfg, authority, certPEM, keyPEM, certDir, d.bootstrapAddr, d.grpcAddr, registry, logger)
+	if err != nil {
+		return d, err
+	}
+
+	rl := sentinelgrpc.NewRateLimiter(100, time.Second)
+	policy := rbac.NewPolicy()
+	d.grpcServer, err = sentinelgrpc.NewServer(certPEM, keyPEM, authority.RootCertPEM(), policy,
+		sentinelgrpc.WithRateLimiter(rl),
+	)
+	if err != nil {
+		return d, fmt.Errorf("init gRPC server: %w", err)
+	}
+	registerServices(d.grpcServer, sb, sessionMgr, d.workerPool, logger)
+
+	return d, nil
+}
+
+// loadDeviceIdentity loads the fleet CA and the device's signed certificate and
+// key from the data directory, and derives the device ID.
+func loadDeviceIdentity() (authority *ca.CA, certPEM, keyPEM []byte, certDir, deviceID string, err error) {
+	caDir, err := datadir.CADir()
+	if err != nil {
+		return nil, nil, nil, "", "", fmt.Errorf("ca dir: %w", err)
+	}
+	authority, err = ca.Load(caDir)
+	if err != nil {
+		return nil, nil, nil, "", "", fmt.Errorf("load CA (run 'sentinel ca init' first): %w", err)
+	}
+	certDir, err = datadir.CertDir()
+	if err != nil {
+		return nil, nil, nil, "", "", fmt.Errorf("cert dir: %w", err)
+	}
+	certPEM, err = os.ReadFile(filepath.Join(certDir, "device.crt"))
+	if err != nil {
+		return nil, nil, nil, "", "", fmt.Errorf("read device cert: %w", err)
+	}
+	keyPEM, err = os.ReadFile(filepath.Join(certDir, "device.key"))
+	if err != nil {
+		return nil, nil, nil, "", "", fmt.Errorf("read device key: %w", err)
+	}
+	deviceID, _ = ca.DeviceID(certPEM)
+	return authority, certPEM, keyPEM, certDir, deviceID, nil
+}
+
+// openDataStores initializes the fleet registry, sandbox, and session manager
+// over the shared database handle.
+func openDataStores(db *sql.DB, cfg *settings.Config, logger *slog.Logger) (*fleet.Registry, *sandbox.Sandbox, *session.Manager, error) {
+	registry, err := fleet.NewRegistry(db)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("init fleet registry: %w", err)
+	}
+
+	sandboxRoot := cfg.Sandbox.Root
+	if sandboxRoot == "" {
+		sandboxRoot, _ = datadir.SandboxRoot()
+	}
+	sb, err := sandbox.New(sandbox.Config{
+		Root:            sandboxRoot,
+		ReadPatterns:    cfg.Sandbox.Allowlist.Read,
+		ExecAllowlist:   cfg.Sandbox.Allowlist.Exec,
+		BlockedCommands: cfg.Sandbox.Allowlist.BlockedCommands,
+	})
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("init sandbox: %w", err)
+	}
+	logger.Info("sandbox initialized", "root", sb.Root())
+
+	sessionMgr, err := session.NewManager(db)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("init session manager: %w", err)
+	}
+	return registry, sb, sessionMgr, nil
+}
+
+// buildTransport creates the bootstrap identity and the two-phase transport
+// manager. Listeners are not bound until serve runs.
+func buildTransport(cfg *settings.Config, authority *ca.CA, certPEM, keyPEM []byte, certDir, bootstrapAddr, grpcAddr string, registry *fleet.Registry, logger *slog.Logger) (*transport.Manager, error) {
+	certStore, err := transport.NewCertStore(certDir)
+	if err != nil {
+		return nil, fmt.Errorf("cert store: %w", err)
+	}
+	bootCert, bootKey, err := loadOrCreateBootstrapIdentity(certStore)
+	if err != nil {
+		return nil, err
+	}
+
+	mgr, err := transport.NewManager(transport.Config{
+		BootstrapAddr:    bootstrapAddr,
+		MTLSAddr:         grpcAddr,
+		CA:               authority,
+		DeviceCertPEM:    certPEM,
+		DeviceKeyPEM:     keyPEM,
+		BootstrapCertPEM: bootCert,
+		BootstrapKeyPEM:  bootKey,
+		BootstrapTimeout: 0, // No timeout — keep bootstrap open for pairing.
+		Logger:           logger,
+		OnPeerAccepted:   buildOnPeerAccepted(logger, registry, cfg.Security.AutoAccept),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("init transport: %w", err)
+	}
+	return mgr, nil
+}
+
+// serve binds listeners, starts background monitors, and blocks until the
+// context is cancelled or the gRPC server returns a fatal error.
+func (d *daemon) serve(ctx context.Context) error {
+	logger := d.logger
+
+	// Start bootstrap listener for device pairing (regardless of mTLS state).
+	if err := d.transportMgr.StartBootstrapOnly(ctx); err != nil {
+		logger.Warn("could not start bootstrap port", "error", err)
+	} else {
+		d.addCleanup(func() { d.transportMgr.Stop() })
+		bs := transport.NewBootstrapServer(d.transportMgr, version)
+		go func() {
+			if err := bs.Serve(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				logger.Error("bootstrap server stopped", "error", err)
+			}
+		}()
+		logger.Info("bootstrap server started for pairing", "addr", d.bootstrapAddr)
+	}
+
+	phase := "mtls"
+	if d.transportMgr.BootstrapListener() != nil {
+		phase = "mtls+bootstrap"
+	}
+	printStartupBanner(d.deviceID, d.grpcAddr, d.bootstrapAddr, phase, d.workerPool)
+
+	startHeartbeatMonitor(ctx, d.sessionMgr, logger)
+
+	healthMonitor := fleet.NewHealthMonitor(d.registry, d.certDir, logger, 60*time.Second)
+	go healthMonitor.Start(ctx)
+
+	metricsServer := startMetricsServer(logger, d.metricsAddr, d.workerPool)
+
+	logger.Info("starting gRPC server", "addr", d.grpcAddr)
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- d.grpcServer.Serve(d.grpcAddr)
+	}()
+
+	// Wait for shutdown signal or server error.
+	select {
+	case <-ctx.Done():
+		logger.Info("shutting down...")
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		_ = metricsServer.Shutdown(shutdownCtx)
+		d.grpcServer.Stop()
+		return nil
+	case err := <-errCh:
+		return fmt.Errorf("gRPC server: %w", err)
+	}
+}
+
+// setupLogging builds the daemon logger, preferring a rotating file writer and
+// falling back to stderr when the log file cannot be opened. The returned close
+// function flushes/closes the file writer (no-op for the stderr fallback).
+func setupLogging(cfg *settings.Config) (*slog.Logger, func() error) {
 	logPath := cfg.Logging.File
 	if logPath == "" {
 		logPath = datadir.LogPath()
 	}
-
-	var logWriter *logrotate.Writer
 	maxSize := cfg.Logging.MaxSizeMB
 	if maxSize == 0 {
 		maxSize = 50
@@ -82,134 +346,88 @@ func runDaemon() error {
 	if maxFiles == 0 {
 		maxFiles = 5
 	}
-	logWriter, err = logrotate.New(logPath, maxSize, maxFiles)
+	level := parseLogLevel(cfg.Logging.Level)
+
+	logWriter, err := logrotate.New(logPath, maxSize, maxFiles)
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "warning: failed to open log file %s: %v\n", logPath, err)
+		return slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: level})), func() error { return nil }
 	}
+	logger := slog.New(slog.NewJSONHandler(logWriter, &slog.HandlerOptions{Level: level}))
+	return logger, logWriter.Close
+}
 
-	var logger *slog.Logger
-	if logWriter != nil {
-		defer func() { _ = logWriter.Close() }()
-		logger = slog.New(slog.NewJSONHandler(logWriter, &slog.HandlerOptions{
-			Level: parseLogLevel(cfg.Logging.Level),
-		}))
-	} else {
-		logger = slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
-			Level: parseLogLevel(cfg.Logging.Level),
-		}))
+// warnCertExpiry logs and prints a warning when the device certificate has
+// expired or is close to expiring. Unparseable certificates are ignored.
+func warnCertExpiry(logger *slog.Logger, certPEM []byte) {
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		return
 	}
-
-	logger.Info("sentinel daemon starting", "version", version)
-
-	// Ensure data directory exists.
-	if err := os.MkdirAll(datadir.Root(), 0o700); err != nil {
-		return fmt.Errorf("create data dir: %w", err)
-	}
-
-	// Write PID file.
-	if err := serverinfo.WritePID(datadir.Root()); err != nil {
-		return fmt.Errorf("write PID: %w", err)
-	}
-	defer func() { _ = serverinfo.RemovePID(datadir.Root()) }()
-
-	// Load CA and certificates.
-	caDir, err := datadir.CADir()
+	cert, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {
-		return fmt.Errorf("ca dir: %w", err)
+		return
 	}
-
-	authority, err := ca.Load(caDir)
-	if err != nil {
-		return fmt.Errorf("load CA (run 'sentinel ca init' first): %w", err)
+	daysLeft := int(time.Until(cert.NotAfter).Hours() / 24)
+	switch {
+	case daysLeft <= 0:
+		logger.Error("device certificate has EXPIRED", "expired", cert.NotAfter.Format("2006-01-02"))
+		_, _ = fmt.Fprintf(os.Stderr, "WARNING: Device certificate expired on %s! Run 'sentinel ca init' to renew.\n", cert.NotAfter.Format("2006-01-02"))
+	case daysLeft <= 30:
+		logger.Warn("device certificate expires soon", "days_left", daysLeft, "expires", cert.NotAfter.Format("2006-01-02"))
+		_, _ = fmt.Fprintf(os.Stderr, "WARNING: Device certificate expires in %d days (%s)\n", daysLeft, cert.NotAfter.Format("2006-01-02"))
 	}
+}
 
-	certDir, err := datadir.CertDir()
-	if err != nil {
-		return fmt.Errorf("cert dir: %w", err)
-	}
-
-	certPEM, err := os.ReadFile(filepath.Join(certDir, "device.crt"))
-	if err != nil {
-		return fmt.Errorf("read device cert: %w", err)
-	}
-
-	keyPEM, err := os.ReadFile(filepath.Join(certDir, "device.key"))
-	if err != nil {
-		return fmt.Errorf("read device key: %w", err)
-	}
-
-	deviceID, _ := ca.DeviceID(certPEM)
-	logger.Info("device identity loaded", "device_id", deviceID)
-
-	// Check certificate expiry.
-	if block, _ := pem.Decode(certPEM); block != nil {
-		if cert, err := x509.ParseCertificate(block.Bytes); err == nil {
-			daysLeft := int(time.Until(cert.NotAfter).Hours() / 24)
-			if daysLeft <= 0 {
-				logger.Error("device certificate has EXPIRED", "expired", cert.NotAfter.Format("2006-01-02"))
-				_, _ = fmt.Fprintf(os.Stderr, "WARNING: Device certificate expired on %s! Run 'sentinel ca init' to renew.\n", cert.NotAfter.Format("2006-01-02"))
-			} else if daysLeft <= 30 {
-				logger.Warn("device certificate expires soon", "days_left", daysLeft, "expires", cert.NotAfter.Format("2006-01-02"))
-				_, _ = fmt.Fprintf(os.Stderr, "WARNING: Device certificate expires in %d days (%s)\n", daysLeft, cert.NotAfter.Format("2006-01-02"))
-			}
+// loadOrCreateBootstrapIdentity loads the persisted bootstrap identity or
+// generates and persists a fresh one.
+func loadOrCreateBootstrapIdentity(certStore *transport.CertStore) (certPEM, keyPEM []byte, err error) {
+	if certStore.HasBootstrap() {
+		certPEM, keyPEM, err = certStore.LoadBootstrap()
+		if err != nil {
+			return nil, nil, fmt.Errorf("load bootstrap identity: %w", err)
 		}
+		return certPEM, keyPEM, nil
 	}
-
-	grpcAddr := cfg.Listen.GRPC
-	if grpcAddr == "" {
-		grpcAddr = ":7400"
-	}
-
-	bootstrapAddr := ":7399"
-
-	// Initialize SQLite database.
-	db, err := sql.Open("sqlite", datadir.DBPath())
+	certPEM, keyPEM, err = transport.GenerateBootstrapIdentity()
 	if err != nil {
-		return fmt.Errorf("open database: %w", err)
+		return nil, nil, fmt.Errorf("generate bootstrap identity: %w", err)
 	}
-	defer func() { _ = db.Close() }()
-
-	// Initialize fleet registry.
-	registry, err := fleet.NewRegistry(db)
-	if err != nil {
-		return fmt.Errorf("init fleet registry: %w", err)
+	if err := certStore.SaveBootstrap(certPEM, keyPEM); err != nil {
+		return nil, nil, fmt.Errorf("save bootstrap identity: %w", err)
 	}
+	return certPEM, keyPEM, nil
+}
 
-	// Initialize sandbox.
-	sandboxRoot := cfg.Sandbox.Root
-	if sandboxRoot == "" {
-		sandboxRoot, _ = datadir.SandboxRoot()
+// buildOnPeerAccepted returns the bootstrap peer-acceptance callback. When
+// auto-accept is disabled, the peer is recorded as pending for manual approval.
+func buildOnPeerAccepted(logger *slog.Logger, registry *fleet.Registry, autoAccept bool) func(string, []byte, string) (bool, error) {
+	return func(peerID string, peerCert []byte, role string) (bool, error) {
+		logger.Info("pairing request received", "peer_device_id", peerID, "requested_role", role)
+
+		if autoAccept {
+			logger.Info("auto-accepting peer", "device_id", peerID)
+			return true, nil
+		}
+
+		if err := registry.AddPending(&fleet.Device{
+			DeviceID: peerID,
+			CertPEM:  peerCert,
+			Role:     role,
+		}); err != nil {
+			logger.Error("failed to add pending device", "error", err)
+			return false, err
+		}
+
+		logger.Info("device added to pending list — use 'sentinel pair accept' to approve", "device_id", peerID)
+		// For now, auto-accept to complete the handshake.
+		// In production, this would wait for manual approval.
+		return true, nil
 	}
+}
 
-	sb, err := sandbox.New(sandbox.Config{
-		Root:            sandboxRoot,
-		ReadPatterns:    cfg.Sandbox.Allowlist.Read,
-		ExecAllowlist:   cfg.Sandbox.Allowlist.Exec,
-		BlockedCommands: cfg.Sandbox.Allowlist.BlockedCommands,
-	})
-	if err != nil {
-		return fmt.Errorf("init sandbox: %w", err)
-	}
-	logger.Info("sandbox initialized", "root", sb.Root())
-
-	// Initialize session manager.
-	sessionMgr, err := session.NewManager(db)
-	if err != nil {
-		return fmt.Errorf("init session manager: %w", err)
-	}
-
-	// Recover interrupted sessions.
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
-
-	recovered, err := sessionMgr.RecoverInterrupted(ctx)
-	if err != nil {
-		logger.Warn("session recovery failed", "error", err)
-	} else if recovered > 0 {
-		logger.Info("recovered interrupted sessions", "count", recovered)
-	}
-
-	// Start heartbeat monitoring goroutine.
+// startHeartbeatMonitor periodically marks stale sessions until ctx is done.
+func startHeartbeatMonitor(ctx context.Context, sessionMgr *session.Manager, logger *slog.Logger) {
 	go func() {
 		ticker := time.NewTicker(15 * time.Second)
 		defer ticker.Stop()
@@ -224,170 +442,44 @@ func runDaemon() error {
 			}
 		}
 	}()
+}
 
-	// Initialize worker pool.
-	workerPool, err := worker.NewPool(db, sb, worker.WithLogger(logger))
-	if err != nil {
-		return fmt.Errorf("init worker pool: %w", err)
-	}
-	defer workerPool.Stop()
-
-	// --- Transport: Bootstrap + mTLS ---
-
-	// Generate or load bootstrap identity.
-	certStore, err := transport.NewCertStore(certDir)
-	if err != nil {
-		return fmt.Errorf("cert store: %w", err)
-	}
-
-	var bootCert, bootKey []byte
-	if certStore.HasBootstrap() {
-		bootCert, bootKey, err = certStore.LoadBootstrap()
-		if err != nil {
-			return fmt.Errorf("load bootstrap identity: %w", err)
+// startMetricsServer serves the Prometheus-style metrics endpoint on its own
+// goroutine and returns the server so it can be shut down gracefully.
+func startMetricsServer(logger *slog.Logger, addr string, pool *worker.Pool) *http.Server {
+	handler := metrics.NewHandler(time.Now(), pool)
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", handler)
+	srv := &http.Server{Addr: addr, Handler: mux}
+	go func() {
+		logger.Info("starting metrics server", "addr", addr)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("metrics server failed", "error", err)
 		}
-	} else {
-		bootCert, bootKey, err = transport.GenerateBootstrapIdentity()
-		if err != nil {
-			return fmt.Errorf("generate bootstrap identity: %w", err)
-		}
-		if err := certStore.SaveBootstrap(bootCert, bootKey); err != nil {
-			return fmt.Errorf("save bootstrap identity: %w", err)
-		}
-	}
+	}()
+	return srv
+}
 
-	transportMgr, err := transport.NewManager(transport.Config{
-		BootstrapAddr:    bootstrapAddr,
-		MTLSAddr:         grpcAddr,
-		CA:               authority,
-		DeviceCertPEM:    certPEM,
-		DeviceKeyPEM:     keyPEM,
-		BootstrapCertPEM: bootCert,
-		BootstrapKeyPEM:  bootKey,
-		BootstrapTimeout: 0, // No timeout — keep bootstrap open for pairing.
-		Logger:           logger,
-		OnPeerAccepted: func(peerID string, peerCert []byte, role string) (bool, error) {
-			logger.Info("pairing request received",
-				"peer_device_id", peerID,
-				"requested_role", role)
-
-			// Auto-accept if configured, otherwise add as pending.
-			if cfg.Security.AutoAccept {
-				logger.Info("auto-accepting peer", "device_id", peerID)
-				return true, nil
-			}
-
-			// Add to pending list for manual approval.
-			if err := registry.AddPending(&fleet.Device{
-				DeviceID: peerID,
-				CertPEM:  peerCert,
-				Role:     role,
-			}); err != nil {
-				logger.Error("failed to add pending device", "error", err)
-				return false, err
-			}
-
-			logger.Info("device added to pending list — use 'sentinel pair accept' to approve",
-				"device_id", peerID)
-
-			// For now, auto-accept to complete the handshake.
-			// In production, this would wait for manual approval.
-			return true, nil
-		},
-	})
-	if err != nil {
-		return fmt.Errorf("init transport: %w", err)
-	}
-
-	// Start bootstrap listener for device pairing (regardless of mTLS state).
-	// The gRPC server handles mTLS on :7400 separately.
-	if err := transportMgr.StartBootstrapOnly(ctx); err != nil {
-		logger.Warn("could not start bootstrap port", "error", err)
-	} else {
-		defer transportMgr.Stop()
-		bs := transport.NewBootstrapServer(transportMgr, version)
-		go func() {
-			if err := bs.Serve(ctx); err != nil && !errors.Is(err, context.Canceled) {
-				logger.Error("bootstrap server stopped", "error", err)
-			}
-		}()
-		logger.Info("bootstrap server started for pairing", "addr", bootstrapAddr)
-	}
-
-	// Print startup info.
-	phase := "mtls"
-	if transportMgr.BootstrapListener() != nil {
-		phase = "mtls+bootstrap"
-	}
-	printStartupBanner(deviceID, grpcAddr, bootstrapAddr, phase, workerPool)
-
-	// Create services.
+// registerServices registers every gRPC service on the server.
+func registerServices(grpcServer *sentinelgrpc.Server, sb *sandbox.Sandbox, sessionMgr *session.Manager, pool *worker.Pool, logger *slog.Logger) {
 	runner := exec.NewRunner(sb)
 	fsSvc := fs.NewService(sb)
-
-	// Create rate limiter: 100 requests per second per client.
-	rl := sentinelgrpc.NewRateLimiter(100, time.Second)
-
-	// Create gRPC server with mTLS and rate limiting.
-	policy := rbac.NewPolicy()
-	grpcServer, err := sentinelgrpc.NewServer(certPEM, keyPEM, authority.RootCertPEM(), policy,
-		sentinelgrpc.WithRateLimiter(rl),
-	)
-	if err != nil {
-		return fmt.Errorf("init gRPC server: %w", err)
-	}
-
-	// Create payload handler registry.
 	payloadRegistry := payload.NewRegistry()
 
-	// Register services.
 	grpcServer.RegisterExecService(sentinelgrpc.NewExecService(runner, sessionMgr, logger))
 	grpcServer.RegisterFileSystemService(sentinelgrpc.NewFileSystemService(fsSvc, sessionMgr))
 	grpcServer.RegisterSessionService(sentinelgrpc.NewSessionService(sessionMgr))
 	grpcServer.RegisterPayloadService(sentinelgrpc.NewPayloadService(payloadRegistry))
-	grpcServer.RegisterWorkerService(sentinelgrpc.NewWorkerService(workerPool))
+	grpcServer.RegisterWorkerService(sentinelgrpc.NewWorkerService(pool))
 	grpcServer.RegisterCaptureService(sentinelgrpc.NewCaptureService())
+}
 
-	// Start fleet health monitor.
-	healthMonitor := fleet.NewHealthMonitor(registry, certDir, logger, 60*time.Second)
-	go healthMonitor.Start(ctx)
-
-	// Start metrics HTTP server.
-	metricsAddr := cfg.Listen.Metrics
-	if metricsAddr == "" {
-		metricsAddr = ":7401"
+// orDefault returns v, or def when v is empty.
+func orDefault(v, def string) string {
+	if v == "" {
+		return def
 	}
-	metricsHandler := metrics.NewHandler(time.Now(), workerPool)
-	metricsMux := http.NewServeMux()
-	metricsMux.Handle("/metrics", metricsHandler)
-	metricsServer := &http.Server{Addr: metricsAddr, Handler: metricsMux}
-	go func() {
-		logger.Info("starting metrics server", "addr", metricsAddr)
-		if err := metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Error("metrics server failed", "error", err)
-		}
-	}()
-
-	logger.Info("starting gRPC server", "addr", grpcAddr)
-
-	// Start gRPC server on the mTLS port.
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- grpcServer.Serve(grpcAddr)
-	}()
-
-	// Wait for shutdown signal or server error.
-	select {
-	case <-ctx.Done():
-		logger.Info("shutting down...")
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer shutdownCancel()
-		_ = metricsServer.Shutdown(shutdownCtx)
-		grpcServer.Stop()
-		return nil
-	case err := <-errCh:
-		return fmt.Errorf("gRPC server: %w", err)
-	}
+	return v
 }
 
 func printStartupBanner(deviceID, grpcAddr, bootstrapAddr, phase string, pool *worker.Pool) {
@@ -472,6 +564,12 @@ func getLocalIPs() []string {
 }
 
 func getPublicIP() string {
+	// Allow disabling the outbound lookup for air-gapped deployments and tests;
+	// it otherwise makes external HTTP calls that can block startup.
+	if os.Getenv("SENTINEL_SKIP_PUBLIC_IP") != "" {
+		return "(disabled)"
+	}
+
 	client := &http.Client{Timeout: 3 * time.Second}
 	endpoints := []string{
 		"https://api.ipify.org",

@@ -25,8 +25,9 @@ type DeviceConfig struct {
 }
 
 type ListenConfig struct {
-	GRPC    string `yaml:"grpc"`
-	Metrics string `yaml:"metrics"`
+	GRPC      string `yaml:"grpc"`
+	Bootstrap string `yaml:"bootstrap"`
+	Metrics   string `yaml:"metrics"`
 }
 
 type SecurityConfig struct {
@@ -53,15 +54,15 @@ type FleetConfig struct {
 }
 
 type CaptureConfig struct {
-	ElectronPath   string `yaml:"electron_path"`
-	IPCPort        int    `yaml:"ipc_port"`
-	DefaultQuality int    `yaml:"default_quality"`
+	ElectronPath   string  `yaml:"electron_path"`
+	IPCPort        int     `yaml:"ipc_port"`
+	DefaultQuality int     `yaml:"default_quality"`
 	DefaultScale   float64 `yaml:"default_scale"`
 }
 
 type SessionConfig struct {
-	HeartbeatInterval int `yaml:"heartbeat_interval_seconds"`
-	MaxIdleMinutes    int `yaml:"max_idle_minutes"`
+	HeartbeatInterval int  `yaml:"heartbeat_interval_seconds"`
+	MaxIdleMinutes    int  `yaml:"max_idle_minutes"`
 	CheckpointOnExec  bool `yaml:"checkpoint_on_exec"`
 	CheckpointOnWrite bool `yaml:"checkpoint_on_write"`
 }
@@ -78,8 +79,9 @@ type LoggingConfig struct {
 func DefaultConfig() *Config {
 	return &Config{
 		Listen: ListenConfig{
-			GRPC:    ":7400",
-			Metrics: ":7401",
+			GRPC:      ":7400",
+			Bootstrap: ":7399",
+			Metrics:   ":7401",
 		},
 		Security: SecurityConfig{
 			AutoAccept: false,
