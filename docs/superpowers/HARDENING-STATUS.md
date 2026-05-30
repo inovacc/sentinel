@@ -14,6 +14,7 @@
 | `10bd93d` | Phase 2c | Mark T1.4 closed in threat model. |
 | `52e2473` | Phase 1 | BP004 discarded-error fixes on trust/persistence paths (bootstrap MsgComplete, serve Serve(), logrotate rename/remove + first tests, worker persistence/decode). |
 | `153a70d` | Phase 1 | Thread daemon logger into ExecService; dropped session audit events (checkpoint/error/command/stream) now logged — closes repudiation gap T2.5/T7.3. |
+| `2f32aa2` | Phase 1 | (branch `hardening/serve-refactor`) Refactor `runDaemon` cognitive complexity 62 → 12 via build/serve split; closes the sole critical finding. First `cmd` boot smoke-tests. |
 
 **Net result:**
 - 0 known reachable CVEs (was 5 critical).
@@ -43,13 +44,17 @@ Remaining BP004 worth a follow-up (all low severity, no logger in scope):
   promote to Debug logs only if forensics needs them.
 - 38 `_test.go` discards — review case-by-case (low value).
 
+**Done (branch `hardening/serve-refactor`, commit `2f32aa2`):**
+- ~~1 critical: `runDaemon` cognitive complexity 62~~ → **resolved**. Split into
+  `runDaemonCtx` → `buildDaemon` (wiring) + `(*daemon).serve` (listen/block) with extracted
+  helpers (`loadDeviceIdentity`, `openDataStores`, `buildTransport`, `setupLogging`,
+  `warnCertExpiry`, `loadOrCreateBootstrapIdentity`, `buildOnPeerAccepted`,
+  `startHeartbeatMonitor`, `startMetricsServer`, `registerServices`). Measured with `gocognit`:
+  no function in `serve.go` exceeds 15 (buildDaemon = 12). Added the package's first tests
+  (boot-and-shutdown smoke test on ephemeral ports). `settings.Listen.Bootstrap` added
+  (port was hardcoded); `SENTINEL_SKIP_PUBLIC_IP` added to skip the startup-blocking outbound probe.
+
 **Still open:**
-- 1 critical: `runDaemon` cognitive complexity 62 (cmd/serve.go). **Deferred** from the
-  2026-05-30 pass: it is a maintainability metric on the *untested* daemon-boot path, the
-  external auditor can't be re-run locally to confirm it drops under threshold, and boot can't
-  be runtime-tested here (needs CA/certs/ports). Do it in a dedicated branch with a boot
-  smoke-test first, then extract `setupLogging` / `warnCertExpiry` / `startHeartbeat` /
-  `buildOnPeerAccepted` / `startMetricsServer` / `loadOrCreateBootstrapIdentity` / `registerServices`.
 - 11 other cognitive-complexity *majors* (bootstrap `handleConn`/`Connect`, fs `Grep`/`grepFile`/`ListDir`,
   session `selectSessions`, etc.) — refactor opportunistically.
 - 11 BP002 (too many params), 109 BP006 (magic numbers), 2 BP001.
