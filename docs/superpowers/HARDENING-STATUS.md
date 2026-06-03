@@ -3,6 +3,39 @@
 **Branch:** `hardening/sprint0-vulns` (7 commits, ready for review/PR)
 **Last updated:** 2026-05-30
 
+---
+
+## 2026-06-03 — Evidence-driven CA-trust hardening
+
+**Branch:** `hardening/evidence-ca-trust` (7 commits off `main`)
+**Input:** field-failure bundle `F:\evicende_sentinel` — a peer rotated its CA; its
+`:7400` daemon kept serving the stale server cert, so every paired client's data
+plane broke with `x509: certificate signed by unknown authority`, while
+`sentinel doctor` reported all-green throughout.
+**Full findings:** `docs/security/EVIDENCE-HARDENING-FINDINGS.md` (27 confirmed,
+0 refuted; 34-agent investigation + per-finding adversarial verification).
+
+The failure exposed that Sentinel could neither **detect**, **diagnose**, nor
+**recover** from a CA-trust mismatch. This campaign closes that chain:
+
+| Commit | What | Closes |
+|---|---|---|
+| `ded49ed` | toolchain `1.26.3 → 1.26.4` | reachable CVEs GO-2026-5039 (net/textproto), GO-2026-5037 (crypto/x509); govulncheck clean |
+| `e62a526` | pin per-peer CA fingerprint at pairing (`ca.Fingerprint`, registry `CAFingerprint`/`CACertPEM` + additive migration, `SetCAPin`) | makes rotation **detectable** (was: undetectable) |
+| `8fff298` | `internal/clierr` classifies x509/handshake errors → actionable remediation; root `SilenceUsage`/`SilenceErrors` + `Execute` prints `clierr.Explain` | raw x509 + cobra-usage dump → **diagnosable** |
+| `57f23a0` | `connect` refuses to silently re-pair a known peer whose CA changed (`pairingConflict`, check **before** `SaveMTLS`); `--force` to override | 2nd CRITICAL: connect-time rotation/MITM accepted silently |
+| `b4a2371` | `doctor` `checkFleetTrust` probes each pinned peer's mTLS and verifies against the pinned CA | doctor blind-spot (all-green while data plane dead) |
+| `b0f8d4a` | `serve` closes bootstrap after mTLS transition (`shouldOpenBootstrap`); `serve --renew-certs` + new `sentinel renew` (time-boxed window) | always-open bootstrap surface; **recovery** path |
+
+Scope chosen by the owner: clusters A+B+C+D+E (detect → diagnose → recover),
+secure-default bootstrap lifecycle. Deferred (owner's call): full CRL/OCSP
+revocation, CA-rotation trust-overlap window, cryptographic device-ID binding,
+broader RBAC/EKU scoping (clusters F/G in the findings doc).
+
+All changes are TDD'd (table-driven), `go build`/`vet`/`test`/`govulncheck` green.
+
+---
+
 ## Done
 
 | Commit | Phase | Description |
