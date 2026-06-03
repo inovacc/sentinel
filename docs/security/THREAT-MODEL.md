@@ -73,9 +73,9 @@ Status: ✅ implemented, 🟡 partial, ❌ not yet (becomes Phase 3 work).
 
 | ID | STRIDE | Threat | Sev | Mitigation | Code | Test | Status |
 |----|--------|--------|-----|------------|------|------|--------|
-| T5.1 | E | Allowlisted binary is itself a code-execution vector (e.g., `python -c`) | C | Allowlist is necessary but not sufficient; layer an OS sandbox (seccomp / Job Object / sandbox-exec) | exec wrapper (Phase 3.6) | TBD | ❌ → Phase 3.6 |
+| T5.1 | E | Allowlisted binary is itself a code-execution vector (e.g., `python -c`) | C | OS confinement on Windows (Job Object + restricted token) via `internal/confine`; fail-closed on Windows, no-op+warn on Linux/macOS pending v2 (Landlock/seccomp). Layered on top of the binary allowlist (T3.1) — allowlist is necessary but not sufficient. | `internal/confine/` | `internal/confine/confine_windows_test.go` | 🟡 — Windows confinement shipped 2026-06-03 (Phase 3.6 v1); Linux/macOS native sandbox → v2 |
 | T5.2 | E | Argument injection turns `git clone $URL` into something dangerous | H | Use `exec.Command` with explicit argv (never shell); validate URL/path arguments | `internal/exec/` | exec_test.go | ✅ |
-| T5.3 | D | Spawned process runs forever / consumes all RAM | M | Per-session CPU/memory/FD ulimits | resource limits (Phase 3.2) | TBD | ❌ → Phase 3.2 |
+| T5.3 | D | Spawned process runs forever / consumes all RAM | M | Per-session CPU/memory/FD ulimits; Windows Job Object now caps active processes, committed memory, and CPU rate, with kill-on-close (`internal/confine`) | resource limits (Phase 3.2); `internal/confine/` (Windows) | `internal/confine/confine_windows_test.go` | 🟡 — Windows process/memory/CPU caps shipped 2026-06-03; cross-platform FD/ulimits → Phase 3.2 |
 | T5.4 | I | Spawned process inherits daemon's env (including secrets) | H | Whitelist-only env propagation to children | `internal/exec/` | exec_test.go | 🟡 — verify in audit |
 
 ### TB6 — FS sandbox

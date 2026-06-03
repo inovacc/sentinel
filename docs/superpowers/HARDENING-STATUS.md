@@ -5,6 +5,39 @@
 
 ---
 
+## 2026-06-03 — Phase 3.6 v1: OS process confinement (Windows)
+
+**Branch:** `feature/os-sandbox`
+**Spec:** `docs/superpowers/specs/2026-05-22-hardening-design.md` (Phase 3.6)
+**Plan:** `docs/superpowers/plans/2026-06-03-os-sandbox.md`
+
+Layers an OS sandbox on top of the binary allowlist so an allowlisted-but-dangerous
+binary (e.g. `python -c`) can no longer use full host resources. New `internal/confine`
+package exposes a `Confiner` (`Prepare`/`Confine`/`Supported`/`Close`); `confine.Decide`
+picks a real confiner on Windows and a no-op everywhere else. A nil/no-op confiner stays
+a pure no-op so existing behavior is unchanged.
+
+| What | Detail | Closes |
+|---|---|---|
+| Confiner interface + no-op + fail-closed posture | `internal/confine/confine.go`, `confine_other.go` | T5.1 scaffolding |
+| Windows Job Object | active-process / committed-memory / CPU-rate caps + kill-on-close | T5.1, T5.3 (process/memory/CPU caps on Windows) |
+| Windows restricted token | drops admin SID + dangerous privileges on the spawned process | T5.1 (privilege reduction) |
+| Config block + migration | `confine` settings (mode/limits) with additive migration | — |
+| Exec + worker integration | `exec.Runner` and `worker.Pool` apply the confiner fail-closed on Windows | T5.1 |
+| Daemon wiring | `cmd/serve.go` builds the confiner (real on Windows, no-op elsewhere) and closes it on shutdown | — |
+
+**Posture:** fail-closed on Windows (a confinement error aborts the exec); no-op + one-time
+warn on Linux/macOS. Confinement here is a **shared** Job Object with kill-on-daemon-exit —
+the documented v1 limitation.
+
+**Remaining:** v2 — Linux native sandbox (Landlock/seccomp) and macOS (`sandbox-exec`);
+v3 — Windows AppContainer / container-per-exec isolation.
+
+All changes TDD'd (table-driven); Windows-tagged files typecheck via
+`GOOS=windows go build ./internal/confine/`. `go build`/`vet`/`test` green.
+
+---
+
 ## 2026-06-03 — Evidence-driven CA-trust hardening
 
 **Branch:** `hardening/evidence-ca-trust` (7 commits off `main`)
@@ -95,7 +128,7 @@ Remaining BP004 worth a follow-up (all low severity, no logger in scope):
 
 ### Phase 3 priority order (from threat model)
 
-1. **3.6 OS sandbox** — only mitigation for T5.1 (allowlisted-binary RCE) today is the binary allowlist.
+1. **3.6 OS sandbox** — v1 shipped on Windows (Job Object + restricted token, `internal/confine`); v2 (Linux/macOS native) still open. Was: only mitigation for T5.1 (allowlisted-binary RCE) was the binary allowlist.
 2. **3.4 Crypto hardening** — closes T8.1/T8.2/T8.4/T2.3 (CA key at rest, cert revocation, short-lived certs).
 3. **3.3 Supervisor hardening + signed updates** — closes T9.x (auto-update integrity) and T4.3 (privilege drop).
 4. **3.1 Audit logging** — closes T2.5/T7.3/T8.3 (forensics/repudiation).
