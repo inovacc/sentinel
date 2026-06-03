@@ -81,6 +81,7 @@ type Pool struct {
 	staleTimeout time.Duration
 	logger       *slog.Logger
 	confiner     confine.Confiner
+	warnOnce     sync.Once // guards the one-time "running unconfined" warning
 	cancel       context.CancelFunc
 	done         chan struct{}
 }
@@ -182,7 +183,11 @@ func (p *Pool) Spawn(ctx context.Context, command string, args []string, workDir
 		cErr := p.confiner.Confine(cmd.Process)
 		refuse, warn := confine.Decide(p.confiner.Supported(), cErr)
 		if warn {
-			p.logger.Warn("worker: process running unconfined (no OS sandbox on this platform)")
+			// Warn once per pool: on an unsupported platform this would otherwise
+			// fire on every spawn and flood the log.
+			p.warnOnce.Do(func() {
+				p.logger.Warn("worker: process running unconfined (no OS sandbox on this platform)")
+			})
 		}
 		if refuse {
 			_ = cmd.Process.Kill()

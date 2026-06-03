@@ -20,6 +20,7 @@ type Runner struct {
 	sandbox  *sandbox.Sandbox
 	confiner confine.Confiner
 	logger   *slog.Logger
+	warnOnce sync.Once // guards the one-time "running unconfined" warning
 }
 
 // NewRunner creates a command runner with sandbox enforcement.
@@ -45,7 +46,11 @@ func (r *Runner) applyConfine(p *os.Process) error {
 	err := r.confiner.Confine(p)
 	refuse, warn := confine.Decide(r.confiner.Supported(), err)
 	if warn && r.logger != nil {
-		r.logger.Warn("exec: process is running unconfined (no OS sandbox on this platform)")
+		// Warn once per runner: on an unsupported platform this would otherwise
+		// fire on every exec and flood the log.
+		r.warnOnce.Do(func() {
+			r.logger.Warn("exec: process is running unconfined (no OS sandbox on this platform)")
+		})
 	}
 	if refuse {
 		_ = p.Kill()
