@@ -48,10 +48,12 @@ func newBootstrapConnectCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			role, _ := cmd.Flags().GetString("role")
-			return runBootstrapConnect(args[0], role)
+			force, _ := cmd.Flags().GetBool("force")
+			return runBootstrapConnect(args[0], role, force)
 		},
 	}
 	connectCmd.Flags().StringP("role", "r", "operator", "Role to request: admin, operator, reader")
+	connectCmd.Flags().Bool("force", false, "Accept a peer whose CA changed since you last paired (use only if you trust the change)")
 	return connectCmd
 }
 
@@ -157,14 +159,14 @@ func runBootstrapTest() error {
 	}
 
 	output := struct {
-		Status       string `json:"status"`
-		PeerDeviceID string `json:"peer_device_id"`
-		OldDeviceID  string `json:"old_device_id"`
-		NewDeviceID  string `json:"new_device_id"`
-		AssignedRole string `json:"assigned_role"`
-		MTLSAddr     string `json:"mtls_addr"`
-		HasSignedCert bool  `json:"has_signed_cert"`
-		HasCACert     bool  `json:"has_ca_cert"`
+		Status        string `json:"status"`
+		PeerDeviceID  string `json:"peer_device_id"`
+		OldDeviceID   string `json:"old_device_id"`
+		NewDeviceID   string `json:"new_device_id"`
+		AssignedRole  string `json:"assigned_role"`
+		MTLSAddr      string `json:"mtls_addr"`
+		HasSignedCert bool   `json:"has_signed_cert"`
+		HasCACert     bool   `json:"has_ca_cert"`
 	}{
 		Status:        "success",
 		PeerDeviceID:  result.PeerDeviceID,
@@ -181,7 +183,7 @@ func runBootstrapTest() error {
 	return enc.Encode(output)
 }
 
-func runBootstrapConnect(addr, role string) error {
+func runBootstrapConnect(addr, role string, force bool) error {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	// Generate or load bootstrap identity.
@@ -238,6 +240,27 @@ func runBootstrapConnect(addr, role string) error {
 		return fmt.Errorf("bootstrap connect: %w", err)
 	}
 
+	// Pin the CA we paired with so a later rotation by the peer is detectable
+	// instead of a silent handshake break.
+	caFingerprint := ""
+	if len(result.CACertPEM) > 0 {
+		caFingerprint, _ = ca.Fingerprint(result.CACertPEM)
+	}
+
+	// Open the registry up front so we can guard against silently re-pairing a
+	// known peer whose CA changed (rotation / MITM) BEFORE overwriting the local
+	// mTLS material on disk.
+	reg, cleanup, regErr := openRegistry()
+	if regErr != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "warning: failed to open registry: %v\n", regErr)
+	} else {
+		defer cleanup()
+		existing, _ := reg.Get(result.PeerDeviceID)
+		if conflict, msg := pairingConflict(existing, caFingerprint); conflict && !force {
+			return fmt.Errorf("%s", msg)
+		}
+	}
+
 	// Save the received mTLS certs.
 	if len(result.SignedCertPEM) > 0 && len(result.CACertPEM) > 0 {
 		if err := store.SaveMTLS(result.SignedCertPEM, clientManager.DeviceKeyPEM(), result.CACertPEM); err != nil {
@@ -247,20 +270,9 @@ func runBootstrapConnect(addr, role string) error {
 		}
 	}
 
-	// Register the server in the local fleet registry.
-	reg, cleanup, err := openRegistry()
-	if err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "warning: failed to open registry: %v\n", err)
-	} else {
-		defer cleanup()
-		// Build mTLS address from bootstrap addr host + mTLS port.
+	// Register/refresh the server in the local fleet registry, pinning its CA.
+	if reg != nil {
 		mtlsAddr := buildMTLSAddr(addr, result.MTLSAddr)
-		// Pin the CA we paired with so a later rotation by the peer is
-		// detectable instead of a silent handshake break.
-		caFingerprint := ""
-		if len(result.CACertPEM) > 0 {
-			caFingerprint, _ = ca.Fingerprint(result.CACertPEM)
-		}
 		peerDevice := &fleet.Device{
 			DeviceID:      result.PeerDeviceID,
 			Address:       mtlsAddr,
@@ -271,13 +283,10 @@ func runBootstrapConnect(addr, role string) error {
 		}
 		if err := reg.AddPending(peerDevice); err != nil {
 			_, _ = fmt.Fprintf(os.Stderr, "warning: failed to register peer: %v\n", err)
+		} else if err := reg.Accept(result.PeerDeviceID, "admin"); err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "warning: failed to accept peer: %v\n", err)
 		} else {
-			// Auto-accept the server since we just bootstrapped with it.
-			if err := reg.Accept(result.PeerDeviceID, "admin"); err != nil {
-				_, _ = fmt.Fprintf(os.Stderr, "warning: failed to accept peer: %v\n", err)
-			} else {
-				_, _ = fmt.Fprintf(os.Stderr, "Registered peer %s in fleet registry\n", result.PeerDeviceID)
-			}
+			_, _ = fmt.Fprintf(os.Stderr, "Registered peer %s in fleet registry\n", result.PeerDeviceID)
 		}
 	}
 
