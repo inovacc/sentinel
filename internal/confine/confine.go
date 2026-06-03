@@ -57,6 +57,12 @@ func (noopConfiner) Confine(*os.Process) error { return nil }
 func (noopConfiner) Supported() bool           { return false }
 func (noopConfiner) Close() error              { return nil }
 
+// Decide is the exported form of decide so other packages (exec, worker) can
+// reuse the fail-closed posture rule.
+func Decide(supported bool, applyErr error) (refuse bool, warn bool) {
+	return decide(supported, applyErr)
+}
+
 // decide maps confiner support and a per-spawn apply error to an action. On a
 // supported platform an apply error is fatal (refuse). On an unsupported
 // platform the spawn proceeds but the caller should warn.

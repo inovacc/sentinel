@@ -15,9 +15,10 @@ type Fake struct {
 	ConfineErr   error
 	Prepared     int
 	Confined     int
+	Closed       int
 }
 
 func (f *Fake) Prepare(*osexec.Cmd) error { f.Prepared++; return f.PrepareErr }
 func (f *Fake) Confine(*os.Process) error { f.Confined++; return f.ConfineErr }
 func (f *Fake) Supported() bool           { return f.SupportedVal }
-func (f *Fake) Close() error              { return nil }
+func (f *Fake) Close() error              { f.Closed++; return nil }

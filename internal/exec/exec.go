@@ -5,22 +5,57 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	osexec "os/exec"
 	"sync"
 	"time"
 
+	"github.com/inovacc/sentinel/internal/confine"
 	"github.com/inovacc/sentinel/internal/sandbox"
 )
 
 // Runner executes commands within sandbox constraints.
 type Runner struct {
-	sandbox *sandbox.Sandbox
+	sandbox  *sandbox.Sandbox
+	confiner confine.Confiner
+	logger   *slog.Logger
 }
 
 // NewRunner creates a command runner with sandbox enforcement.
 func NewRunner(sb *sandbox.Sandbox) *Runner {
 	return &Runner{sandbox: sb}
+}
+
+// NewRunnerWithConfiner injects a confiner and logger (used by the daemon).
+func NewRunnerWithConfiner(sb *sandbox.Sandbox, c confine.Confiner, logger *slog.Logger) *Runner {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &Runner{sandbox: sb, confiner: c, logger: logger}
+}
+
+// applyConfine applies the confiner to a started process, returning an error
+// when the platform supports confinement but it could not be applied
+// (fail-closed). A nil confiner is a no-op, preserving legacy behavior.
+func (r *Runner) applyConfine(p *os.Process) error {
+	if r.confiner == nil {
+		return nil // no confiner configured (e.g. legacy callers/tests)
+	}
+	err := r.confiner.Confine(p)
+	refuse, warn := confine.Decide(r.confiner.Supported(), err)
+	if warn && r.logger != nil {
+		r.logger.Warn("exec: process is running unconfined (no OS sandbox on this platform)")
+	}
+	if refuse {
+		_ = p.Kill()
+		// Reap the killed child so it does not linger as a zombie on Unix.
+		// The caller returns immediately on error and never calls Wait, so
+		// confinement enforcement owns cleanup of the process it refused.
+		_, _ = p.Wait()
+		return fmt.Errorf("exec: refusing unconfined process: %w", err)
+	}
+	return nil
 }
 
 // RunRequest describes a command to execute.
@@ -69,7 +104,13 @@ func (r *Runner) Run(ctx context.Context, req *RunRequest) (*RunResult, error) {
 	cmd.Stderr = &stderr
 
 	start := time.Now()
-	runErr := cmd.Run()
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("exec: start command: %w", err)
+	}
+	if err := r.applyConfine(cmd.Process); err != nil {
+		return nil, err
+	}
+	runErr := cmd.Wait()
 	duration := time.Since(start).Milliseconds()
 
 	result := &RunResult{
@@ -106,6 +147,10 @@ func (r *Runner) runBackground(ctx context.Context, req *RunRequest) (*RunResult
 
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("exec: start background: %w", err)
+	}
+
+	if err := r.applyConfine(cmd.Process); err != nil {
+		return nil, err
 	}
 
 	pid := cmd.Process.Pid
@@ -150,6 +195,10 @@ func (r *Runner) RunStream(ctx context.Context, req *RunRequest, onOutput func(s
 	start := time.Now()
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("exec: start command: %w", err)
+	}
+
+	if err := r.applyConfine(cmd.Process); err != nil {
+		return nil, err
 	}
 
 	var wg sync.WaitGroup
@@ -202,6 +251,12 @@ func (r *Runner) buildCmd(ctx context.Context, req *RunRequest) (*osexec.Cmd, er
 		env = append(env, k+"="+v)
 	}
 	cmd.Env = env
+
+	if r.confiner != nil {
+		if err := r.confiner.Prepare(cmd); err != nil {
+			return nil, fmt.Errorf("exec: prepare confinement: %w", err)
+		}
+	}
 
 	return cmd, nil
 }
