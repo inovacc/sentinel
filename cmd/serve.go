@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/inovacc/sentinel/internal/ca"
+	"github.com/inovacc/sentinel/internal/confine"
 	"github.com/inovacc/sentinel/internal/datadir"
 	"github.com/inovacc/sentinel/internal/discovery"
 	"github.com/inovacc/sentinel/internal/exec"
@@ -160,6 +161,20 @@ func buildDaemon(ctx context.Context) (*daemon, error) {
 	d.addCleanup(func() { _ = logClose() })
 	logger.Info("sentinel daemon starting", "version", version)
 
+	// Build one OS process confiner from config (a real one on Windows, a
+	// no-op+warn elsewhere) and tear it down on shutdown — closing it kills any
+	// processes still held in its job object.
+	confiner, err := confine.New(confine.Config{
+		Enabled:      cfg.Confine.Enabled,
+		MaxMemoryMB:  cfg.Confine.MaxMemoryMB,
+		CPUPercent:   cfg.Confine.CPUPercent,
+		MaxProcesses: cfg.Confine.MaxProcesses,
+	}, logger)
+	if err != nil {
+		return d, fmt.Errorf("init confiner: %w", err)
+	}
+	d.addCleanup(func() { _ = confiner.Close() })
+
 	if err := os.MkdirAll(datadir.Root(), 0o700); err != nil {
 		return d, fmt.Errorf("create data dir: %w", err)
 	}
@@ -218,7 +233,7 @@ func buildDaemon(ctx context.Context) (*daemon, error) {
 		logger.Info("recovered interrupted sessions", "count", recovered)
 	}
 
-	d.workerPool, err = worker.NewPool(db, sb, worker.WithLogger(logger))
+	d.workerPool, err = worker.NewPool(db, sb, worker.WithLogger(logger), worker.WithConfiner(confiner))
 	if err != nil {
 		return d, fmt.Errorf("init worker pool: %w", err)
 	}
@@ -237,7 +252,7 @@ func buildDaemon(ctx context.Context) (*daemon, error) {
 	if err != nil {
 		return d, fmt.Errorf("init gRPC server: %w", err)
 	}
-	registerServices(d.grpcServer, sb, sessionMgr, d.workerPool, logger)
+	registerServices(d.grpcServer, sb, sessionMgr, d.workerPool, confiner, logger)
 
 	return d, nil
 }
@@ -576,8 +591,8 @@ func startDiscoveryBeacon(logger *slog.Logger, deviceID, bootstrapAddr string, w
 }
 
 // registerServices registers every gRPC service on the server.
-func registerServices(grpcServer *sentinelgrpc.Server, sb *sandbox.Sandbox, sessionMgr *session.Manager, pool *worker.Pool, logger *slog.Logger) {
-	runner := exec.NewRunner(sb)
+func registerServices(grpcServer *sentinelgrpc.Server, sb *sandbox.Sandbox, sessionMgr *session.Manager, pool *worker.Pool, confiner confine.Confiner, logger *slog.Logger) {
+	runner := exec.NewRunnerWithConfiner(sb, confiner, logger)
 	fsSvc := fs.NewService(sb)
 	payloadRegistry := payload.NewRegistry()
 
