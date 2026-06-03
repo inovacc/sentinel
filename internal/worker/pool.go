@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/inovacc/sentinel/internal/confine"
 	"github.com/inovacc/sentinel/internal/sandbox"
 )
 
@@ -67,6 +68,9 @@ func WithStaleTimeout(d time.Duration) Option { return func(p *Pool) { p.staleTi
 // WithLogger sets the logger.
 func WithLogger(l *slog.Logger) Option { return func(p *Pool) { p.logger = l } }
 
+// WithConfiner sets the OS process confiner.
+func WithConfiner(c confine.Confiner) Option { return func(p *Pool) { p.confiner = c } }
+
 // Pool manages worker processes.
 type Pool struct {
 	mu           sync.RWMutex
@@ -76,6 +80,7 @@ type Pool struct {
 	maxWorkers   int
 	staleTimeout time.Duration
 	logger       *slog.Logger
+	confiner     confine.Confiner
 	cancel       context.CancelFunc
 	done         chan struct{}
 }
@@ -163,8 +168,31 @@ func (p *Pool) Spawn(ctx context.Context, command string, args []string, workDir
 	cmd.Stdout = &stdoutBuf
 	cmd.Stderr = &stderrBuf
 
+	if p.confiner != nil {
+		if err := p.confiner.Prepare(cmd); err != nil {
+			return nil, fmt.Errorf("worker: prepare confinement: %w", err)
+		}
+	}
+
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("worker: start: %w", err)
+	}
+
+	if p.confiner != nil {
+		cErr := p.confiner.Confine(cmd.Process)
+		refuse, warn := confine.Decide(p.confiner.Supported(), cErr)
+		if warn {
+			p.logger.Warn("worker: process running unconfined (no OS sandbox on this platform)")
+		}
+		if refuse {
+			_ = cmd.Process.Kill()
+			// Reap the killed child so it does not linger as a zombie on Unix.
+			// Spawn returns immediately on error before the activeWorker is built
+			// and before go p.monitor (the only place cmd.Wait runs), so
+			// confinement enforcement owns cleanup of the process it refused.
+			_, _ = cmd.Process.Wait()
+			return nil, fmt.Errorf("worker: refusing unconfined process: %w", cErr)
+		}
 	}
 
 	aw := &activeWorker{
