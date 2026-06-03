@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	osexec "os/exec"
+	"syscall"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -20,18 +21,25 @@ type windowsConfiner struct {
 }
 
 func newConfiner(cfg Config, logger *slog.Logger) (Confiner, error) {
+	tok, err := newRestrictedToken()
+	if err != nil {
+		return nil, fmt.Errorf("confine: restricted token: %w", err)
+	}
 	job, err := newJobObject(cfg)
 	if err != nil {
+		_ = tok.Close()
 		return nil, fmt.Errorf("confine: job object: %w", err)
 	}
-	return &windowsConfiner{cfg: cfg, logger: logger, job: job}, nil
+	return &windowsConfiner{cfg: cfg, logger: logger, token: tok, job: job}, nil
 }
 
 func (c *windowsConfiner) Supported() bool { return true }
 
 func (c *windowsConfiner) Prepare(cmd *osexec.Cmd) error {
-	// Token is wired in Task 4; nothing required here yet.
-	_ = cmd
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.Token = syscall.Token(c.token)
 	return nil
 }
 
@@ -115,4 +123,48 @@ func setCPURate(job windows.Handle, pct uint32) error {
 		uint32(unsafe.Sizeof(info)),
 	)
 	return err
+}
+
+var (
+	modadvapi32               = windows.NewLazySystemDLL("advapi32.dll")
+	procCreateRestrictedToken = modadvapi32.NewProc("CreateRestrictedToken")
+)
+
+// disableMaxPrivilege drops all privileges except SeChangeNotifyPrivilege.
+const disableMaxPrivilege = 0x1
+
+// newRestrictedToken duplicates the current process token, disables the
+// Administrators group SID, and drops privileges, returning a primary token
+// suitable for CreateProcessAsUser.
+func newRestrictedToken() (windows.Token, error) {
+	var base windows.Token
+	if err := windows.OpenProcessToken(
+		windows.CurrentProcess(),
+		windows.TOKEN_DUPLICATE|windows.TOKEN_ASSIGN_PRIMARY|windows.TOKEN_QUERY,
+		&base,
+	); err != nil {
+		return 0, fmt.Errorf("open process token: %w", err)
+	}
+	defer func() { _ = base.Close() }()
+
+	adminSid, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		return 0, fmt.Errorf("admin sid: %w", err)
+	}
+	disable := []windows.SIDAndAttributes{{Sid: adminSid, Attributes: 0}}
+
+	var restricted windows.Token
+	r1, _, e1 := procCreateRestrictedToken.Call(
+		uintptr(base),
+		uintptr(disableMaxPrivilege),
+		uintptr(len(disable)),
+		uintptr(unsafe.Pointer(&disable[0])),
+		0, 0, // PrivilegesToDelete (covered by DISABLE_MAX_PRIVILEGE)
+		0, 0, // SidsToRestrict
+		uintptr(unsafe.Pointer(&restricted)),
+	)
+	if r1 == 0 {
+		return 0, fmt.Errorf("CreateRestrictedToken: %w", e1)
+	}
+	return restricted, nil
 }
