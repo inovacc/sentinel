@@ -19,17 +19,25 @@ const (
 
 // Device represents a registered device in the fleet.
 type Device struct {
-	DeviceID    string       `json:"device_id"`
-	Hostname    string       `json:"hostname"`
-	OS          string       `json:"os"`
-	Arch        string       `json:"arch"`
-	Role        string       `json:"role"`
-	Status      DeviceStatus `json:"status"`
-	Address     string       `json:"address"`
-	CertPEM     []byte       `json:"-"`
-	LastSeenAt  time.Time    `json:"last_seen_at"`
-	CreatedAt   time.Time    `json:"created_at"`
-	Metadata    map[string]string `json:"metadata,omitempty"`
+	DeviceID   string            `json:"device_id"`
+	Hostname   string            `json:"hostname"`
+	OS         string            `json:"os"`
+	Arch       string            `json:"arch"`
+	Role       string            `json:"role"`
+	Status     DeviceStatus      `json:"status"`
+	Address    string            `json:"address"`
+	CertPEM    []byte            `json:"-"`
+	LastSeenAt time.Time         `json:"last_seen_at"`
+	CreatedAt  time.Time         `json:"created_at"`
+	Metadata   map[string]string `json:"metadata,omitempty"`
+
+	// CAFingerprint is the "sha256:<hex>" fingerprint of the CA certificate
+	// this peer was paired with. It pins the trust anchor so a later CA
+	// rotation by the peer is detectable rather than a silent handshake break.
+	CAFingerprint string `json:"ca_fingerprint,omitempty"`
+	// CACertPEM is the PEM of the CA certificate pinned at pairing time. It is
+	// the trust root used to verify this specific peer's mTLS chain.
+	CACertPEM []byte `json:"-"`
 }
 
 // Registry manages the fleet of known devices.
@@ -49,22 +57,67 @@ func NewRegistry(db *sql.DB) (*Registry, error) {
 func (r *Registry) migrate() error {
 	const schema = `
 CREATE TABLE IF NOT EXISTS fleet_devices (
-    device_id    TEXT PRIMARY KEY,
-    hostname     TEXT NOT NULL DEFAULT '',
-    os           TEXT NOT NULL DEFAULT '',
-    arch         TEXT NOT NULL DEFAULT '',
-    role         TEXT NOT NULL DEFAULT 'reader',
-    status       TEXT NOT NULL DEFAULT 'pending',
-    address      TEXT NOT NULL DEFAULT '',
-    cert_pem     BLOB,
-    last_seen_at INTEGER NOT NULL,
-    created_at   INTEGER NOT NULL,
-    metadata     TEXT DEFAULT '{}'
+    device_id      TEXT PRIMARY KEY,
+    hostname       TEXT NOT NULL DEFAULT '',
+    os             TEXT NOT NULL DEFAULT '',
+    arch           TEXT NOT NULL DEFAULT '',
+    role           TEXT NOT NULL DEFAULT 'reader',
+    status         TEXT NOT NULL DEFAULT 'pending',
+    address        TEXT NOT NULL DEFAULT '',
+    cert_pem       BLOB,
+    last_seen_at   INTEGER NOT NULL,
+    created_at     INTEGER NOT NULL,
+    metadata       TEXT DEFAULT '{}',
+    ca_fingerprint TEXT NOT NULL DEFAULT '',
+    ca_cert_pem    BLOB
 );
 CREATE INDEX IF NOT EXISTS idx_fleet_status ON fleet_devices(status);
 `
-	_, err := r.db.Exec(schema)
-	return err
+	if _, err := r.db.Exec(schema); err != nil {
+		return err
+	}
+	// Additive migration for databases created before the CA-pin columns
+	// existed. New columns are added in place; existing rows keep their data.
+	for _, c := range []struct{ name, ddl string }{
+		{"ca_fingerprint", "ALTER TABLE fleet_devices ADD COLUMN ca_fingerprint TEXT NOT NULL DEFAULT ''"},
+		{"ca_cert_pem", "ALTER TABLE fleet_devices ADD COLUMN ca_cert_pem BLOB"},
+	} {
+		has, err := r.hasColumn("fleet_devices", c.name)
+		if err != nil {
+			return fmt.Errorf("fleet: inspect column %s: %w", c.name, err)
+		}
+		if has {
+			continue
+		}
+		if _, err := r.db.Exec(c.ddl); err != nil {
+			return fmt.Errorf("fleet: add column %s: %w", c.name, err)
+		}
+	}
+	return nil
+}
+
+// hasColumn reports whether the named column exists on the given table.
+func (r *Registry) hasColumn(table, column string) (bool, error) {
+	rows, err := r.db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var (
+			cid         int
+			name, ctype string
+			notNull, pk int
+			dfltValue   sql.NullString
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dfltValue, &pk); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 // AddPending adds a device as pending (awaiting approval).
@@ -72,9 +125,9 @@ func (r *Registry) AddPending(d *Device) error {
 	meta, _ := json.Marshal(d.Metadata)
 	now := time.Now().Unix()
 	_, err := r.db.Exec(
-		`INSERT OR REPLACE INTO fleet_devices (device_id, hostname, os, arch, role, status, address, cert_pem, last_seen_at, created_at, metadata)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		d.DeviceID, d.Hostname, d.OS, d.Arch, d.Role, string(StatusPending), d.Address, d.CertPEM, now, now, string(meta),
+		`INSERT OR REPLACE INTO fleet_devices (device_id, hostname, os, arch, role, status, address, cert_pem, last_seen_at, created_at, metadata, ca_fingerprint, ca_cert_pem)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		d.DeviceID, d.Hostname, d.OS, d.Arch, d.Role, string(StatusPending), d.Address, d.CertPEM, now, now, string(meta), d.CAFingerprint, d.CACertPEM,
 	)
 	if err != nil {
 		return fmt.Errorf("fleet: add pending device: %w", err)
@@ -130,7 +183,7 @@ func (r *Registry) Remove(deviceID string) error {
 // Get returns a device by ID.
 func (r *Registry) Get(deviceID string) (*Device, error) {
 	row := r.db.QueryRow(
-		`SELECT device_id, hostname, os, arch, role, status, address, cert_pem, last_seen_at, created_at, metadata
+		`SELECT device_id, hostname, os, arch, role, status, address, cert_pem, last_seen_at, created_at, metadata, ca_fingerprint, ca_cert_pem
 		 FROM fleet_devices WHERE device_id = ?`, deviceID,
 	)
 	return scanDevice(row)
@@ -142,12 +195,12 @@ func (r *Registry) List(statusFilter DeviceStatus) ([]Device, error) {
 	var err error
 	if statusFilter != "" {
 		rows, err = r.db.Query(
-			`SELECT device_id, hostname, os, arch, role, status, address, cert_pem, last_seen_at, created_at, metadata
+			`SELECT device_id, hostname, os, arch, role, status, address, cert_pem, last_seen_at, created_at, metadata, ca_fingerprint, ca_cert_pem
 			 FROM fleet_devices WHERE status = ? ORDER BY last_seen_at DESC`, string(statusFilter),
 		)
 	} else {
 		rows, err = r.db.Query(
-			`SELECT device_id, hostname, os, arch, role, status, address, cert_pem, last_seen_at, created_at, metadata
+			`SELECT device_id, hostname, os, arch, role, status, address, cert_pem, last_seen_at, created_at, metadata, ca_fingerprint, ca_cert_pem
 			 FROM fleet_devices ORDER BY last_seen_at DESC`,
 		)
 	}
@@ -215,7 +268,7 @@ func scanDevice(row *sql.Row) (*Device, error) {
 	d := &Device{}
 	var lastSeen, created int64
 	var meta string
-	err := row.Scan(&d.DeviceID, &d.Hostname, &d.OS, &d.Arch, &d.Role, &d.Status, &d.Address, &d.CertPEM, &lastSeen, &created, &meta)
+	err := row.Scan(&d.DeviceID, &d.Hostname, &d.OS, &d.Arch, &d.Role, &d.Status, &d.Address, &d.CertPEM, &lastSeen, &created, &meta, &d.CAFingerprint, &d.CACertPEM)
 	if err != nil {
 		return nil, fmt.Errorf("fleet: scan device: %w", err)
 	}
@@ -229,7 +282,7 @@ func scanDeviceRow(rows *sql.Rows) (*Device, error) {
 	d := &Device{}
 	var lastSeen, created int64
 	var meta string
-	err := rows.Scan(&d.DeviceID, &d.Hostname, &d.OS, &d.Arch, &d.Role, &d.Status, &d.Address, &d.CertPEM, &lastSeen, &created, &meta)
+	err := rows.Scan(&d.DeviceID, &d.Hostname, &d.OS, &d.Arch, &d.Role, &d.Status, &d.Address, &d.CertPEM, &lastSeen, &created, &meta, &d.CAFingerprint, &d.CACertPEM)
 	if err != nil {
 		return nil, fmt.Errorf("fleet: scan device row: %w", err)
 	}
@@ -237,4 +290,22 @@ func scanDeviceRow(rows *sql.Rows) (*Device, error) {
 	d.CreatedAt = time.Unix(created, 0)
 	_ = json.Unmarshal([]byte(meta), &d.Metadata)
 	return d, nil
+}
+
+// SetCAPin records the pinned CA fingerprint and certificate for a peer. The
+// fingerprint pins the trust anchor agreed at pairing time so a later CA
+// rotation is detectable. Returns an error if the device is not registered.
+func (r *Registry) SetCAPin(deviceID, fingerprint string, caCertPEM []byte) error {
+	res, err := r.db.Exec(
+		`UPDATE fleet_devices SET ca_fingerprint = ?, ca_cert_pem = ? WHERE device_id = ?`,
+		fingerprint, caCertPEM, deviceID,
+	)
+	if err != nil {
+		return fmt.Errorf("fleet: set CA pin: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("fleet: device %s not found", deviceID)
+	}
+	return nil
 }

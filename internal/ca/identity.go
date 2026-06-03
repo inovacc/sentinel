@@ -3,10 +3,23 @@ package ca
 import (
 	"crypto/sha256"
 	"encoding/base32"
+	"encoding/hex"
 	"encoding/pem"
 	"fmt"
 	"strings"
 )
+
+// Fingerprint returns a stable, human-readable SHA-256 fingerprint of a
+// certificate's DER bytes, formatted as "sha256:<hex>". It is used to pin the
+// CA a peer was paired with so that a later CA rotation is detectable.
+func Fingerprint(certPEM []byte) (string, error) {
+	block, _ := pem.Decode(certPEM)
+	if block == nil || block.Type != "CERTIFICATE" {
+		return "", fmt.Errorf("ca: invalid certificate PEM for fingerprint")
+	}
+	sum := sha256.Sum256(block.Bytes)
+	return "sha256:" + hex.EncodeToString(sum[:]), nil
+}
 
 // DeviceID computes a Syncthing-style device ID from a certificate PEM.
 // The ID is the SHA-256 hash of the DER bytes, encoded as base32 (no padding),

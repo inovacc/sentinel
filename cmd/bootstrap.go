@@ -255,11 +255,19 @@ func runBootstrapConnect(addr, role string) error {
 		defer cleanup()
 		// Build mTLS address from bootstrap addr host + mTLS port.
 		mtlsAddr := buildMTLSAddr(addr, result.MTLSAddr)
+		// Pin the CA we paired with so a later rotation by the peer is
+		// detectable instead of a silent handshake break.
+		caFingerprint := ""
+		if len(result.CACertPEM) > 0 {
+			caFingerprint, _ = ca.Fingerprint(result.CACertPEM)
+		}
 		peerDevice := &fleet.Device{
-			DeviceID: result.PeerDeviceID,
-			Address:  mtlsAddr,
-			Role:     "admin", // The server that signed our cert is the authority.
-			Status:   fleet.StatusOnline,
+			DeviceID:      result.PeerDeviceID,
+			Address:       mtlsAddr,
+			Role:          "admin", // The server that signed our cert is the authority.
+			Status:        fleet.StatusOnline,
+			CAFingerprint: caFingerprint,
+			CACertPEM:     result.CACertPEM,
 		}
 		if err := reg.AddPending(peerDevice); err != nil {
 			_, _ = fmt.Fprintf(os.Stderr, "warning: failed to register peer: %v\n", err)
