@@ -10,7 +10,7 @@ import (
 
 // CurrentConfigVersion is the schema version written by this build. Bump it
 // whenever the config layout changes and add a step to Config.Migrate.
-const CurrentConfigVersion = 1
+const CurrentConfigVersion = 2
 
 // Config holds all sentinel configuration.
 type Config struct {
@@ -24,6 +24,7 @@ type Config struct {
 	Session   SessionConfig   `yaml:"session"`
 	Logging   LoggingConfig   `yaml:"logging"`
 	Discovery DiscoveryConfig `yaml:"discovery"`
+	Confine   ConfineConfig   `yaml:"confine"`
 }
 
 type DeviceConfig struct {
@@ -96,6 +97,26 @@ type DiscoveryConfig struct {
 	WindowSeconds int `yaml:"window_seconds"`
 }
 
+// ConfineConfig controls OS-level process confinement (Windows v1).
+type ConfineConfig struct {
+	Enabled      bool   `yaml:"enabled"`
+	MaxMemoryMB  uint64 `yaml:"max_memory_mb"`
+	CPUPercent   uint32 `yaml:"cpu_percent"`
+	MaxProcesses uint32 `yaml:"max_processes"`
+}
+
+// defaultConfineConfig returns the built-in confinement defaults. It is the
+// single source of truth shared by DefaultConfig and Migrate so the two cannot
+// drift when defaults change.
+func defaultConfineConfig() ConfineConfig {
+	return ConfineConfig{
+		Enabled:      true,
+		MaxMemoryMB:  1024,
+		CPUPercent:   80,
+		MaxProcesses: 64,
+	}
+}
+
 // DefaultConfig returns a config with sensible defaults.
 func DefaultConfig() *Config {
 	return &Config{
@@ -142,6 +163,7 @@ func DefaultConfig() *Config {
 			Enabled:       true,
 			WindowSeconds: 300,
 		},
+		Confine: defaultConfineConfig(),
 	}
 }
 
@@ -166,6 +188,10 @@ func (c *Config) Validate() error {
 	// Check session heartbeat interval.
 	if c.Session.HeartbeatInterval < 0 {
 		return fmt.Errorf("session heartbeat_interval must be >= 0")
+	}
+	// Check confine CPU percentage is within range.
+	if c.Confine.CPUPercent > 100 {
+		return fmt.Errorf("confine.cpu_percent must be 0..100, got %d", c.Confine.CPUPercent)
 	}
 	return nil
 }
@@ -220,11 +246,24 @@ func OnDiskVersion(path string) (int, error) {
 }
 
 // Migrate upgrades a loaded config to the current schema version in place,
-// returning true if anything changed. Fields absent from an older file already
-// receive defaults via Load; this stamps the version and is where future
-// field-level migrations (renames, moves) are added per version.
-func (c *Config) Migrate() bool {
+// returning true if anything changed. fromVersion is the schema version recorded
+// on disk (see OnDiskVersion); pass 0 for a pre-versioning or missing file.
+//
+// Migrate is deliberately thin: Load already overlays the on-disk YAML onto
+// DefaultConfig, so any key absent from an older file (e.g. the whole confine:
+// block introduced in v2) keeps its built-in default — there is nothing to back-
+// fill here. Equally important, a v1 file that *does* set confine.enabled: false
+// keeps that explicit choice through Load, and Migrate must not override it; that
+// is why field-level changes are gated on fromVersion, never on whole-struct
+// zero-ness, which would silently re-enable a security toggle the user disabled.
+//
+// This is where future field-level migrations (renames, moves) belong, each
+// guarded by the on-disk fromVersion that introduced the change.
+func (c *Config) Migrate(fromVersion int) bool {
 	changed := false
+	// (No confine back-fill is needed: Load supplies the v2 defaults for files
+	// that predate the confine: block. fromVersion is retained for the future
+	// field-level migrations described above. See the doc comment.)
 	if c.Version < CurrentConfigVersion {
 		c.Version = CurrentConfigVersion
 		changed = true

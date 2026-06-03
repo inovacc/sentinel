@@ -144,7 +144,7 @@ func checkConfigAt(path string, fix bool) (docResult, *settings.Config) {
 		if !fix {
 			return docResult{name, stWarn, "no config file (using built-in defaults)"}, cfg
 		}
-		cfg.Migrate()
+		cfg.Migrate(diskVer)
 		if err := settings.Save(path, cfg); err != nil {
 			return docResult{name, stFail, fmt.Sprintf("write: %v", err)}, cfg
 		}
@@ -154,7 +154,7 @@ func checkConfigAt(path string, fix bool) (docResult, *settings.Config) {
 		if !fix {
 			return docResult{name, stWarn, fmt.Sprintf("schema v%d, current is v%d", diskVer, settings.CurrentConfigVersion)}, cfg
 		}
-		cfg.Migrate()
+		cfg.Migrate(diskVer)
 		if err := settings.Save(path, cfg); err != nil {
 			return docResult{name, stFail, fmt.Sprintf("write: %v", err)}, cfg
 		}
