@@ -57,7 +57,7 @@ func runDoctor(w io.Writer, fix bool) error {
 	results := []docResult{checkDataDir(fix)}
 
 	cfgResult, cfg := checkConfig(fix)
-	results = append(results, cfgResult, checkCA(), checkDeviceCert(), checkPorts(cfg))
+	results = append(results, cfgResult, checkCA(), checkDeviceCert(), checkPorts(cfg), checkFleetTrust())
 
 	var ok, fixed, warns, fails int
 	_, _ = fmt.Fprintf(w, "Sentinel Doctor  (data dir: %s)\n\n", datadir.Root())
