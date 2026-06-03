@@ -49,6 +49,12 @@ var serveJSON bool
 // config value is used).
 var serveDiscovery *bool
 
+// serveRenewCerts re-opens the bootstrap pairing port even after mTLS is
+// established, so previously-paired peers can re-exchange certificates (e.g.
+// after this host rotates its CA). It defaults off: a steady-state mTLS daemon
+// keeps the pairing port closed.
+var serveRenewCerts bool
+
 func newServeCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "serve",
@@ -60,12 +66,21 @@ func newServeCmd() *cobra.Command {
 				v, _ := cmd.Flags().GetBool("discovery")
 				serveDiscovery = &v
 			}
+			serveRenewCerts, _ = cmd.Flags().GetBool("renew-certs")
 			return runDaemon()
 		},
 	}
 	cmd.Flags().BoolVar(&serveJSON, "json", false, "Output startup banner as JSON")
 	cmd.Flags().Bool("discovery", true, "Advertise on the LAN via mDNS (overrides config when set)")
+	cmd.Flags().Bool("renew-certs", false, "Re-open the bootstrap port for re-pairing even after mTLS is established")
 	return cmd
+}
+
+// shouldOpenBootstrap decides whether the bootstrap pairing port should be
+// opened. It stays closed once mTLS is established (PhaseMTLS) to shrink the
+// pairing attack surface, unless renewal was explicitly requested.
+func shouldOpenBootstrap(phase transport.Phase, renewCerts bool) bool {
+	return renewCerts || phase != transport.PhaseMTLS
 }
 
 // runDaemon wires a cancellable signal context and runs the daemon until an
@@ -110,6 +125,8 @@ type daemon struct {
 	discoveryEnabled bool
 	discoveryWindow  time.Duration
 	discoveryBeacon  *discovery.Beacon
+
+	renewCerts bool
 
 	cleanups []func()
 }
@@ -180,6 +197,7 @@ func buildDaemon(ctx context.Context) (*daemon, error) {
 		windowSec = 300
 	}
 	d.discoveryWindow = time.Duration(windowSec) * time.Second
+	d.renewCerts = serveRenewCerts
 
 	db, err := sql.Open("sqlite", datadir.DBPath())
 	if err != nil {
@@ -316,7 +334,12 @@ func buildTransport(cfg *settings.Config, authority *ca.CA, certPEM, keyPEM []by
 func (d *daemon) serve(ctx context.Context) error {
 	logger := d.logger
 
-	d.startPairing(ctx)
+	if shouldOpenBootstrap(d.transportMgr.Phase(), d.renewCerts) {
+		d.startPairing(ctx)
+	} else {
+		logger.Info("bootstrap pairing port closed after mTLS transition",
+			"hint", "run 'sentinel renew' (or 'sentinel serve --renew-certs') to re-open pairing")
+	}
 
 	phase := "mtls"
 	if d.transportMgr.BootstrapListener() != nil {
