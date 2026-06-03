@@ -23,6 +23,7 @@ func TestClassifyPeerProbe(t *testing.T) {
 		{"trust verified", nil, stOK},
 		{"CA mismatch is a hard failure", caTrust, stFail},
 		{"expired cert is a hard failure", expired, stFail},
+		{"corrupt pinned CA is a hard failure", errInvalidPinnedCA, stFail},
 		{"unreachable is only a warning", unreachable, stWarn},
 	}
 	for _, tt := range tests {

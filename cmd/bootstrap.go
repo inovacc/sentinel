@@ -2,7 +2,9 @@ package cmd
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -241,22 +243,26 @@ func runBootstrapConnect(addr, role string, force bool) error {
 	}
 
 	// Pin the CA we paired with so a later rotation by the peer is detectable
-	// instead of a silent handshake break.
-	caFingerprint := ""
-	if len(result.CACertPEM) > 0 {
-		caFingerprint, _ = ca.Fingerprint(result.CACertPEM)
+	// instead of a silent handshake break. A non-empty but unparseable CA is a
+	// hard error rather than a silent unpinned fallback.
+	caFingerprint, err := caPinFingerprint(result.CACertPEM)
+	if err != nil {
+		return fmt.Errorf("peer CA certificate is unparseable, refusing to pair: %w", err)
 	}
 
-	// Open the registry up front so we can guard against silently re-pairing a
-	// known peer whose CA changed (rotation / MITM) BEFORE overwriting the local
-	// mTLS material on disk.
+	// Guard against silently re-pairing a known peer whose CA changed
+	// (rotation / MITM) BEFORE overwriting local mTLS material. Fails closed: if
+	// the trust store is unavailable we refuse unless --force is given.
 	reg, cleanup, regErr := openRegistry()
 	if regErr != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "warning: failed to open registry: %v\n", regErr)
+		if !force {
+			return fmt.Errorf("cannot open the local trust store (%v); re-run with --force to pair anyway", regErr)
+		}
+		_, _ = fmt.Fprintf(os.Stderr, "warning: trust store unavailable (%v); --force given, proceeding without the CA-change check\n", regErr)
 	} else {
 		defer cleanup()
-		existing, _ := reg.Get(result.PeerDeviceID)
-		if conflict, msg := pairingConflict(existing, caFingerprint); conflict && !force {
+		existing, getErr := reg.Get(result.PeerDeviceID)
+		if msg, refuse := repairGuard(existing, getErr, caFingerprint, force); refuse {
 			return fmt.Errorf("%s", msg)
 		}
 	}
@@ -313,6 +319,33 @@ func runBootstrapConnect(addr, role string, force bool) error {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(output)
+}
+
+// caPinFingerprint returns the fingerprint to pin for a peer's CA. An empty CA
+// yields no pin, but a non-empty yet unparseable CA is a hard error: silently
+// pinning "" would make a malformed CA indistinguishable from an unpinned peer
+// and defeat rotation detection.
+func caPinFingerprint(caCertPEM []byte) (string, error) {
+	if len(caCertPEM) == 0 {
+		return "", nil
+	}
+	return ca.Fingerprint(caCertPEM)
+}
+
+// repairGuard decides whether to refuse a (re-)pairing. It fails closed: a
+// trust-store lookup error other than "not found" refuses unless --force, as
+// does a known peer whose pinned CA changed.
+func repairGuard(existing *fleet.Device, lookupErr error, newFingerprint string, force bool) (string, bool) {
+	if lookupErr != nil && !errors.Is(lookupErr, sql.ErrNoRows) {
+		if force {
+			return "", false
+		}
+		return fmt.Sprintf("cannot verify the peer against the local trust store: %v; re-run with --force to pair anyway", lookupErr), true
+	}
+	if conflict, msg := pairingConflict(existing, newFingerprint); conflict && !force {
+		return msg, true
+	}
+	return "", false
 }
 
 // buildMTLSAddr takes the bootstrap address (e.g., "192.168.1.100:7399")

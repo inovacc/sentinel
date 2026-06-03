@@ -54,8 +54,8 @@ func (d *Diagnostic) Unwrap() error { return d.Err }
 
 const (
 	caTrustRemediation = "The peer's certificate authority no longer matches the one pinned when you paired. " +
-		"The peer most likely rotated its CA. Re-pair with the peer: `sentinel connect <host:7399> --renew` " +
-		"(or run `sentinel renew` on the peer to reopen its bootstrap window)."
+		"The peer most likely rotated its CA. Re-pair with the peer: `sentinel connect <host:7399> --force` " +
+		"(and on the peer, run `sentinel renew` to reopen its bootstrap window)."
 	certExpiredRemediation = "A certificate in the chain has expired. Renew it with `sentinel renew`, " +
 		"then re-pair if the peer's CA also changed."
 )

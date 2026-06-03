@@ -24,6 +24,13 @@ func TestClassify_FieldHandshakeError(t *testing.T) {
 	if !strings.Contains(strings.ToLower(d.Remediation), "re-pair") {
 		t.Errorf("remediation should mention re-pair, got %q", d.Remediation)
 	}
+	// The client-side override flag is --force; --renew is not a connect flag.
+	if !strings.Contains(d.Remediation, "--force") {
+		t.Errorf("remediation must point at the real --force flag, got %q", d.Remediation)
+	}
+	if strings.Contains(d.Remediation, "--renew") {
+		t.Errorf("remediation references a non-existent --renew flag: %q", d.Remediation)
+	}
 }
 
 func TestClassify_TypedUnknownAuthority(t *testing.T) {

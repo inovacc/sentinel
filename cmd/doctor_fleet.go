@@ -3,6 +3,7 @@ package cmd
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -14,6 +15,11 @@ import (
 	"github.com/inovacc/sentinel/internal/datadir"
 	"github.com/inovacc/sentinel/internal/fleet"
 )
+
+// errInvalidPinnedCA marks a peer whose stored pinned CA certificate is itself
+// unparseable (e.g. registry corruption) — a hard trust failure, not a mere
+// reachability warning.
+var errInvalidPinnedCA = errors.New("invalid pinned CA certificate")
 
 // peerProbe is the trust-verification outcome for a single fleet peer.
 type peerProbe struct {
@@ -37,6 +43,10 @@ func checkFleetTrust() docResult {
 	}
 	defer cleanup()
 
+	// Present our own device identity so a peer that requires client auth lets us
+	// complete the handshake. This is best-effort: a missing device cert is a
+	// FAIL in its own check (checkDeviceCert), and without it a mutual-auth peer
+	// surfaces here as a WARN ("unreachable") rather than a false OK.
 	certDir, _ := datadir.CertDir()
 	clientCertPEM, _ := os.ReadFile(filepath.Join(certDir, "device.crt"))
 	clientKeyPEM, _ := os.ReadFile(filepath.Join(certDir, "device.key"))
@@ -65,7 +75,7 @@ func checkFleetTrust() docResult {
 func dialPeerTrust(addr string, pinnedCAPEM, clientCertPEM, clientKeyPEM []byte, timeout time.Duration) error {
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(pinnedCAPEM) {
-		return fmt.Errorf("invalid pinned CA certificate for %s", addr)
+		return fmt.Errorf("%w for %s", errInvalidPinnedCA, addr)
 	}
 
 	var certs []tls.Certificate
@@ -106,10 +116,13 @@ func classifyPeerProbe(deviceID string, dialErr error) peerProbe {
 	if dialErr == nil {
 		return peerProbe{deviceID, stOK, "verified against pinned CA"}
 	}
+	if errors.Is(dialErr, errInvalidPinnedCA) {
+		return peerProbe{deviceID, stFail, "pinned CA certificate is unreadable (registry corruption?) — re-pair"}
+	}
 	if d, ok := clierr.Classify(dialErr); ok {
 		switch d.Kind {
 		case clierr.KindCATrust:
-			return peerProbe{deviceID, stFail, "serves a cert not signed by its pinned CA — re-pair (sentinel connect <host:7399> --renew)"}
+			return peerProbe{deviceID, stFail, "serves a cert not signed by its pinned CA — re-pair (sentinel connect <host:7399> --force)"}
 		case clierr.KindCertExpired:
 			return peerProbe{deviceID, stFail, "certificate expired — renew"}
 		}
