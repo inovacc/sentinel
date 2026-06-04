@@ -136,10 +136,14 @@ func LoadOrInitWithSealer(dir string, sealer *sentinelcrypto.Sealer) (*CA, error
 	return InitWithSealer(dir, sealer)
 }
 
-// SignDevice generates a new device keypair and signs it with the root CA.
-// The role is embedded in a custom X.509 extension.
-// Device certs are valid for 1 year.
+// SignDevice signs a 1-year device cert (backward-compatible default).
 func (c *CA) SignDevice(role string) (certPEM, keyPEM []byte, err error) {
+	return c.SignDeviceFor(role, 365*24*time.Hour)
+}
+
+// SignDeviceFor signs a device cert valid for the given duration (T2.3). The
+// role is embedded in the custom X.509 extension.
+func (c *CA) SignDeviceFor(role string, validity time.Duration) (certPEM, keyPEM []byte, err error) {
 	if !ValidRole(role) {
 		return nil, nil, fmt.Errorf("ca: invalid role %q", role)
 	}
@@ -162,7 +166,7 @@ func (c *CA) SignDevice(role string) (certPEM, keyPEM []byte, err error) {
 			Organization: []string{"Sentinel"},
 		},
 		NotBefore:             now,
-		NotAfter:              now.Add(365 * 24 * time.Hour),
+		NotAfter:              now.Add(validity),
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
@@ -181,6 +185,13 @@ func (c *CA) SignDevice(role string) (certPEM, keyPEM []byte, err error) {
 	}
 
 	return certPEM, keyPEM, nil
+}
+
+// ReSignSelf re-issues a fresh device cert for this node's own key reuse is not
+// possible (a new keypair is generated), valid for validity, using the local CA
+// — no peer interaction. Returns the new cert+key PEM for the caller to persist.
+func (c *CA) ReSignSelf(role string, validity time.Duration) (certPEM, keyPEM []byte, err error) {
+	return c.SignDeviceFor(role, validity)
 }
 
 // SignCSR signs a certificate signing request with the given role.
