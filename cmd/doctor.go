@@ -13,6 +13,7 @@ import (
 
 	"github.com/inovacc/sentinel/internal/ca"
 	"github.com/inovacc/sentinel/internal/datadir"
+	sentinelcrypto "github.com/inovacc/sentinel/internal/security/crypto"
 	"github.com/inovacc/sentinel/internal/settings"
 	"github.com/spf13/cobra"
 )
@@ -57,7 +58,7 @@ func runDoctor(w io.Writer, fix bool) error {
 	results := []docResult{checkDataDir(fix)}
 
 	cfgResult, cfg := checkConfig(fix)
-	results = append(results, cfgResult, checkCA(), checkDeviceCert(), checkPorts(cfg), checkFleetTrust())
+	results = append(results, cfgResult, checkCA(), checkCAKeyAtRest(), checkDeviceCert(), checkPorts(cfg), checkFleetTrust())
 
 	var ok, fixed, warns, fails int
 	_, _ = fmt.Fprintf(w, "Sentinel Doctor  (data dir: %s)\n\n", datadir.Root())
@@ -223,4 +224,28 @@ func checkPorts(cfg *settings.Config) docResult {
 		return docResult{name, stOK, "all available"}
 	}
 	return docResult{name, stWarn, "in use: " + strings.Join(inUse, ", ") + " (daemon already running?)"}
+}
+
+// checkCAKeyAtRest reports whether the CA key is encrypted, which mode protects
+// it, and whether a plaintext backup lingers.
+func checkCAKeyAtRest() docResult {
+	const name = "CA key at rest"
+	caDir := filepath.Join(datadir.Root(), "ca")
+	keyPath := filepath.Join(caDir, "ca.key")
+	raw, err := os.ReadFile(keyPath)
+	if err != nil {
+		return docResult{name, stWarn, "ca.key not found — run 'sentinel ca init'"}
+	}
+	bak := keyPath + ".plaintext.bak"
+	if _, berr := os.Stat(bak); berr == nil {
+		return docResult{name, stWarn, "encrypted, but a plaintext backup remains — securely delete ca.key.plaintext.bak"}
+	}
+	if sentinelcrypto.IsEnvelope(raw) {
+		return docResult{name, stOK, "encrypted at rest"}
+	}
+	cfg, _ := settings.Load(datadir.ConfigPath())
+	if cfg != nil && cfg.Crypto.KeyEncryption == "off" {
+		return docResult{name, stWarn, "PLAINTEXT (crypto.key_encryption=off — dev only)"}
+	}
+	return docResult{name, stWarn, "PLAINTEXT — will be encrypted on next 'sentinel serve'"}
 }

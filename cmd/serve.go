@@ -23,6 +23,7 @@ import (
 
 	"github.com/inovacc/sentinel/internal/audit"
 	"github.com/inovacc/sentinel/internal/ca"
+	"github.com/inovacc/sentinel/internal/clierr"
 	"github.com/inovacc/sentinel/internal/confine"
 	"github.com/inovacc/sentinel/internal/datadir"
 	"github.com/inovacc/sentinel/internal/discovery"
@@ -36,6 +37,7 @@ import (
 	"github.com/inovacc/sentinel/internal/payload"
 	"github.com/inovacc/sentinel/internal/rbac"
 	"github.com/inovacc/sentinel/internal/sandbox"
+	sentinelcrypto "github.com/inovacc/sentinel/internal/security/crypto"
 	"github.com/inovacc/sentinel/internal/serverinfo"
 	"github.com/inovacc/sentinel/internal/session"
 	"github.com/inovacc/sentinel/internal/settings"
@@ -190,21 +192,40 @@ func buildDaemon(ctx context.Context) (*daemon, error) {
 	}
 	d.addCleanup(func() { _ = serverinfo.RemovePID(datadir.Root()) })
 
+	sealer, err := buildSealer(cfg)
+	if err != nil {
+		if d2, ok := clierr.ClassifyCAUnseal(err); ok {
+			return d, fmt.Errorf("%s", d2.Error())
+		}
+		return d, fmt.Errorf("build CA sealer: %w", err)
+	}
+
 	// Create the CA + device identity on first run so `serve` works on a fresh
 	// machine with no separate `ca init` step.
-	if created, ierr := ensureIdentity(); ierr != nil {
+	if created, ierr := ensureIdentityWithSealer(sealer); ierr != nil {
 		return d, fmt.Errorf("ensure identity: %w", ierr)
 	} else if created {
 		logger.Info("initialized new CA and device identity")
 	}
 
-	authority, certPEM, keyPEM, certDir, deviceID, err := loadDeviceIdentity()
+	authority, certPEM, keyPEM, certDir, deviceID, err := loadDeviceIdentity(sealer)
 	if err != nil {
 		return d, err
 	}
 	d.certDir = certDir
 	d.deviceID = deviceID
 	logger.Info("device identity loaded", "device_id", deviceID)
+
+	caDir, _ := datadir.CADir()
+	keyMigrated, merr := ca.MigrateKeyAtRest(caDir, sealer)
+	if merr != nil {
+		return d, fmt.Errorf("migrate CA key at rest: %w", merr)
+	}
+	if keyMigrated {
+		logger.Warn("CA key encrypted at rest; a plaintext backup remains — securely delete it",
+			"backup", filepath.Join(caDir, "ca.key.plaintext.bak"))
+	}
+
 	warnCertExpiry(logger, certPEM)
 
 	// Determine the daemon's own role from the device cert; fall back to admin.
@@ -272,6 +293,19 @@ func buildDaemon(ctx context.Context) (*daemon, error) {
 		Detail:  map[string]any{"device_id": d.deviceID},
 	})
 
+	// Emit cakey.sealed on first migration; fail closed — refuse to proceed
+	// if the migration cannot be audited.
+	if keyMigrated {
+		if aerr := auditLog.Record(context.Background(), audit.Event{
+			Type:    audit.EventCAKeySealed,
+			Outcome: audit.OutcomeAllow,
+			Target:  "ca.key",
+			Detail:  map[string]any{"mode": cfg.Crypto.KeyEncryption},
+		}); aerr != nil {
+			return d, fmt.Errorf("refusing to seal CA key unaudited: %w", aerr)
+		}
+	}
+
 	// Run own-cert renewal once at startup, then every 6 h in the background.
 	if _, rerr := renewSelfIfNeeded(authority, certDir, selfRole, cfg.Crypto, auditLog, logger); rerr != nil {
 		logger.Warn("own-cert startup renewal check failed", "err", rerr)
@@ -319,15 +353,60 @@ func buildDaemon(ctx context.Context) (*daemon, error) {
 	return d, nil
 }
 
+// buildSealer constructs the CA-key sealer from config, reading the passphrase
+// from the configured source. It fails closed: an unavailable keystore with no
+// passphrase fallback is a fatal startup error, never a silent plaintext.
+func buildSealer(cfg *settings.Config) (*sentinelcrypto.Sealer, error) {
+	caDir, err := datadir.CADir()
+	if err != nil {
+		return nil, err
+	}
+	dekPath := filepath.Join(caDir, "ca.key.dek")
+	opts := sentinelcrypto.Options{
+		Mode:     cfg.Crypto.KeyEncryption,
+		KeyStore: sentinelcrypto.NewOSKeyStore(),
+		LoadDEKFile: func() ([]byte, error) {
+			b, rerr := os.ReadFile(dekPath)
+			if errors.Is(rerr, os.ErrNotExist) {
+				return nil, nil
+			}
+			return b, rerr
+		},
+		SaveDEKFile: func(b []byte) error { return os.WriteFile(dekPath, b, 0o600) },
+	}
+	switch cfg.Crypto.KeyEncryption {
+	case sentinelcrypto.ModePassphraseEnv:
+		opts.Passphrase = []byte(os.Getenv(cfg.Crypto.PassphraseEnv))
+	case sentinelcrypto.ModePassphraseFile:
+		p, rerr := os.ReadFile(cfg.Crypto.PassphraseFile)
+		if rerr != nil {
+			return nil, fmt.Errorf("read passphrase file: %w", rerr)
+		}
+		opts.Passphrase = []byte(strings.TrimSpace(string(p)))
+	}
+	if cfg.Crypto.KeyEncryption == sentinelcrypto.ModeOff {
+		slog.Default().Warn("crypto.key_encryption=off — CA key stored in PLAINTEXT (dev only)")
+	}
+	return sentinelcrypto.NewSealer(opts)
+}
+
 // loadDeviceIdentity loads the fleet CA and the device's signed certificate and
-// key from the data directory, and derives the device ID.
-func loadDeviceIdentity() (authority *ca.CA, certPEM, keyPEM []byte, certDir, deviceID string, err error) {
+// key from the data directory, and derives the device ID. The sealer is used to
+// unseal the CA key at rest; a nil sealer falls back to plaintext.
+func loadDeviceIdentity(sealer *sentinelcrypto.Sealer) (authority *ca.CA, certPEM, keyPEM []byte, certDir, deviceID string, err error) {
 	caDir, err := datadir.CADir()
 	if err != nil {
 		return nil, nil, nil, "", "", fmt.Errorf("ca dir: %w", err)
 	}
-	authority, err = ca.Load(caDir)
+	if sealer != nil {
+		authority, err = ca.LoadWithSealer(caDir, sealer)
+	} else {
+		authority, err = ca.Load(caDir)
+	}
 	if err != nil {
+		if d2, ok := clierr.ClassifyCAUnseal(err); ok {
+			return nil, nil, nil, "", "", fmt.Errorf("%s", d2.Error())
+		}
 		return nil, nil, nil, "", "", fmt.Errorf("load CA (run 'sentinel ca init' first): %w", err)
 	}
 	certDir, err = datadir.CertDir()

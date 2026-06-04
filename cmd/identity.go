@@ -7,6 +7,7 @@ import (
 
 	"github.com/inovacc/sentinel/internal/ca"
 	"github.com/inovacc/sentinel/internal/datadir"
+	sentinelcrypto "github.com/inovacc/sentinel/internal/security/crypto"
 )
 
 // ensureIdentity creates the CA and an admin device certificate if they do not
@@ -14,6 +15,13 @@ import (
 // `ca init`. It returns whether it initialized anything. It is idempotent: when
 // both the CA and device cert are present it does nothing.
 func ensureIdentity() (created bool, err error) {
+	return ensureIdentityWithSealer(nil)
+}
+
+// ensureIdentityWithSealer is like ensureIdentity but uses the given sealer
+// when initialising a fresh CA. A nil sealer falls back to plaintext (backward
+// compatible for callers that do not yet have a sealer ready).
+func ensureIdentityWithSealer(sealer *sentinelcrypto.Sealer) (created bool, err error) {
 	caDir, err := datadir.CADir()
 	if err != nil {
 		return false, fmt.Errorf("ca dir: %w", err)
@@ -29,7 +37,12 @@ func ensureIdentity() (created bool, err error) {
 		return false, nil
 	}
 
-	authority, err := ca.LoadOrInit(caDir)
+	var authority *ca.CA
+	if sealer != nil {
+		authority, err = ca.LoadOrInitWithSealer(caDir, sealer)
+	} else {
+		authority, err = ca.LoadOrInit(caDir)
+	}
 	if err != nil {
 		return false, fmt.Errorf("init CA: %w", err)
 	}

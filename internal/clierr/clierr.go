@@ -23,6 +23,8 @@ const (
 	KindCATrust
 	// KindCertExpired means a certificate in the chain has expired.
 	KindCertExpired
+	// KindCAUnseal means the CA private key could not be decrypted at rest.
+	KindCAUnseal
 )
 
 // Diagnostic is a classified, user-facing explanation of a transport error.
@@ -131,4 +133,27 @@ func Explain(err error) string {
 		return d.Error()
 	}
 	return fmt.Sprintf("Error: %s", err.Error())
+}
+
+const caUnsealRemediation = "The CA private key on disk could not be decrypted. This usually means the OS keystore changed (a different user profile, a re-keyed keyring) or the configured passphrase is wrong. Do NOT delete ca.key — the daemon will never regenerate it. Recover by: restoring the keystore/passphrase, or restoring ca.key.plaintext.bak (if migration created one) and re-running, or setting crypto.key_encryption to the mode that matches how the key was sealed."
+
+// ClassifyCAUnseal recognizes a CA-key unseal failure (errors wrapping the
+// crypto package's "unseal" / "auth failed" messages) and returns actionable
+// guidance. Unlike Classify, it matches on the unseal error text.
+func ClassifyCAUnseal(err error) (*Diagnostic, bool) {
+	if err == nil {
+		return nil, false
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "unseal") || strings.Contains(msg, "auth failed") ||
+		strings.Contains(msg, "no os keystore") || strings.Contains(msg, "wrong passphrase") {
+		return &Diagnostic{
+			Kind:        KindCAUnseal,
+			Summary:     "Cannot decrypt the CA private key at rest.",
+			Detail:      err.Error(),
+			Remediation: caUnsealRemediation,
+			Err:         err,
+		}, true
+	}
+	return nil, false
 }
