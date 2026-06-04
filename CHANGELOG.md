@@ -11,6 +11,30 @@ this changelog (≤ `v1.1.0`) are documented there via auto-generated release no
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-06-04
+
+Crypto hardening — protect the CA key at rest and limit the blast radius of a compromised or
+stale device certificate. See `docs/security/THREAT-MODEL.md`.
+
+### Added
+
+- **CA private-key encryption at rest** (`internal/security/crypto`) — envelope encryption: a
+  per-install Data Encryption Key held in the OS keystore (Windows DPAPI / macOS Keychain /
+  Linux Secret Service via go-keyring) wraps `ca.key` as AES-256-GCM, with an argon2id
+  passphrase fallback for headless hosts. Fail-closed — the daemon never regenerates the CA on
+  unseal failure. Existing plaintext keys auto-migrate on first start (backed up to
+  `ca.key.plaintext.bak`). Closes T8.1, T8.2.
+- **Device certificate revocation** — `sentinel revoke` / `sentinel unrevoke`; a revoked
+  device is rejected at the mTLS handshake and its live connections are closed. Closes T8.4.
+- **Short-lived certificates + auto-renewal** — configurable cert validity (default 30 days);
+  the daemon auto-renews its own certificate before expiry. Existing long-lived certs are
+  honored until they expire. Closes T2.3.
+
+### Changed
+
+- Config schema migrated to version 5 (additive `crypto` block).
+- `sentinel doctor` reports CA-key-at-rest status (encrypted vs plaintext).
+
 ## [1.2.0] - 2026-06-04
 
 A security-hardening campaign closing field-driven and threat-model gaps. See
