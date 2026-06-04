@@ -31,7 +31,8 @@ const (
 )
 
 // The default service/account names under which the DEK is stored.
+// These are referenced by manager.go (Task 3); nolint until that file exists.
 const (
-	keystoreService = "sentinel-ca"
-	keystoreAccount = "dek"
+	keystoreService = "sentinel-ca" //nolint:unused
+	keystoreAccount = "dek"         //nolint:unused
 )
