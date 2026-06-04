@@ -31,6 +31,8 @@ import (
 	"time"
 
 	"github.com/inovacc/sentinel/internal/ca"
+	"github.com/inovacc/sentinel/internal/limits"
+	"github.com/inovacc/sentinel/internal/settings"
 )
 
 // Phase describes the current transport lifecycle state.
@@ -81,6 +83,10 @@ type Config struct {
 	Logger *slog.Logger
 	// BootstrapTimeout is the max time to keep bootstrap port open (default 5m).
 	BootstrapTimeout time.Duration
+	// Limits holds resource-limit knobs for the transport layer (T1.3, T2.6).
+	Limits settings.LimitsConfig
+	// LimitRecorder records limit-breach events (nil is a safe no-op).
+	LimitRecorder *limits.Recorder
 }
 
 // Manager orchestrates the two-phase transport lifecycle.

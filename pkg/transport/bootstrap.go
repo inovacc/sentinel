@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/inovacc/sentinel/internal/ca"
+	"github.com/inovacc/sentinel/internal/limits"
 )
 
 // BootstrapServer handles incoming bootstrap connections on the Syncthing-key port.
@@ -28,16 +29,25 @@ type BootstrapServer struct {
 	logger   *slog.Logger
 	version  string
 	hostname string
+	limiter  *perIPLimiter
+	recorder *limits.Recorder
 }
 
 // NewBootstrapServer creates a bootstrap server tied to a transport manager.
 func NewBootstrapServer(m *Manager, version string) *BootstrapServer {
 	hostname, _ := os.Hostname()
+	lc := m.cfg.Limits
+	var lim *perIPLimiter
+	if lc.Enabled {
+		lim = newPerIPLimiter(lc.BootstrapPerIPMaxConns, lc.BootstrapPerIPRate)
+	}
 	return &BootstrapServer{
 		manager:  m,
 		logger:   m.logger.With("component", "bootstrap-server"),
 		version:  version,
 		hostname: hostname,
+		limiter:  lim,
+		recorder: m.cfg.LimitRecorder,
 	}
 }
 
@@ -60,6 +70,24 @@ func (bs *BootstrapServer) Serve(ctx context.Context) error {
 				bs.logger.Info("bootstrap: listener closed")
 				return nil
 			}
+		}
+
+		// Pre-auth per-IP throttle (T1.3): accept-then-close over-limit conns so
+		// the accept loop is never blocked.
+		if bs.limiter != nil {
+			ip := remoteIP(conn.RemoteAddr())
+			release, ok := bs.limiter.acquire(ip)
+			if !ok {
+				bs.logger.Warn("bootstrap: per-IP limit exceeded, dropping", "ip", ip)
+				bs.recorder.Record(ctx, limits.KindBootstrapIP, ip)
+				_ = conn.Close()
+				continue
+			}
+			go func(c net.Conn, rel func()) {
+				defer rel()
+				bs.handleConn(ctx, c)
+			}(conn, release)
+			continue
 		}
 
 		go bs.handleConn(ctx, conn)
