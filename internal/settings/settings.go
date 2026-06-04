@@ -11,7 +11,7 @@ import (
 
 // CurrentConfigVersion is the schema version written by this build. Bump it
 // whenever the config layout changes and add a step to Config.Migrate.
-const CurrentConfigVersion = 4
+const CurrentConfigVersion = 5
 
 // Config holds all sentinel configuration.
 type Config struct {
@@ -28,6 +28,7 @@ type Config struct {
 	Confine   ConfineConfig   `yaml:"confine"`
 	Audit     AuditConfig     `yaml:"audit"`
 	Limits    LimitsConfig    `yaml:"limits"`
+	Crypto    CryptoConfig    `yaml:"crypto"`
 }
 
 type DeviceConfig struct {
@@ -138,6 +139,31 @@ type LimitsConfig struct {
 	ProcMaxCPUSeconds  uint64 `yaml:"proc_max_cpu_seconds"`  // RLIMIT_CPU; 0 = unlimited
 }
 
+// CryptoConfig controls CA-key-at-rest protection and cert lifetime (Phase 3.4).
+type CryptoConfig struct {
+	// KeyEncryption is one of: keystore | passphrase-env | passphrase-file | off.
+	KeyEncryption  string        `yaml:"key_encryption"`
+	PassphraseEnv  string        `yaml:"passphrase_env"`  // env var name (passphrase-env)
+	PassphraseFile string        `yaml:"passphrase_file"` // path (passphrase-file)
+	CertValidity   time.Duration `yaml:"cert_validity"`   // new device certs (default 720h)
+	RenewThreshold time.Duration `yaml:"renew_threshold"` // auto-renew own cert under this (240h)
+}
+
+// maxCertValidity caps cert_validity to keep certs short-lived (T2.3).
+const maxCertValidity = 90 * 24 * time.Hour
+
+// defaultCryptoConfig is the single source of truth shared by DefaultConfig and
+// Migrate so the two cannot drift.
+func defaultCryptoConfig() CryptoConfig {
+	return CryptoConfig{
+		KeyEncryption:  "keystore",
+		PassphraseEnv:  "SENTINEL_CA_PASSPHRASE",
+		PassphraseFile: "",
+		CertValidity:   720 * time.Hour,
+		RenewThreshold: 240 * time.Hour,
+	}
+}
+
 // defaultLimitsConfig is the single source of truth shared by DefaultConfig and
 // Migrate so the two cannot drift.
 func defaultLimitsConfig() LimitsConfig {
@@ -229,6 +255,7 @@ func DefaultConfig() *Config {
 		Confine: defaultConfineConfig(),
 		Audit:   defaultAuditConfig(),
 		Limits:  defaultLimitsConfig(),
+		Crypto:  defaultCryptoConfig(),
 	}
 }
 
@@ -292,6 +319,27 @@ func (c *Config) Validate() error {
 		if c.Limits.RPCRatePerSec <= 0 {
 			return fmt.Errorf("limits.rpc_rate_per_sec must be > 0, got %d", c.Limits.RPCRatePerSec)
 		}
+	}
+	// Check crypto block (Phase 3.4).
+	switch c.Crypto.KeyEncryption {
+	case "keystore", "passphrase-env", "passphrase-file", "off":
+	default:
+		return fmt.Errorf("invalid crypto.key_encryption %q (want keystore|passphrase-env|passphrase-file|off)", c.Crypto.KeyEncryption)
+	}
+	if c.Crypto.KeyEncryption == "passphrase-env" && c.Crypto.PassphraseEnv == "" {
+		return fmt.Errorf("crypto.passphrase_env is required for passphrase-env mode")
+	}
+	if c.Crypto.KeyEncryption == "passphrase-file" && c.Crypto.PassphraseFile == "" {
+		return fmt.Errorf("crypto.passphrase_file is required for passphrase-file mode")
+	}
+	if c.Crypto.CertValidity <= 0 {
+		return fmt.Errorf("crypto.cert_validity must be > 0, got %v", c.Crypto.CertValidity)
+	}
+	if c.Crypto.CertValidity > maxCertValidity {
+		return fmt.Errorf("crypto.cert_validity must be <= %v, got %v", maxCertValidity, c.Crypto.CertValidity)
+	}
+	if c.Crypto.RenewThreshold <= 0 || c.Crypto.RenewThreshold >= c.Crypto.CertValidity {
+		return fmt.Errorf("crypto.renew_threshold must satisfy 0 < threshold < cert_validity, got %v", c.Crypto.RenewThreshold)
 	}
 	return nil
 }
@@ -368,6 +416,13 @@ func (c *Config) Migrate(fromVersion int) bool {
 	// defaults. Detect the unmigrated zero block and restore defaults.
 	if fromVersion < 4 && c.Limits == (LimitsConfig{}) {
 		c.Limits = defaultLimitsConfig()
+		changed = true
+	}
+	// v4 → v5 introduced the crypto: block. A file written at v4 that omits it
+	// already carries defaults via Load's overlay, but an explicit zero block
+	// (or an unmigrated file) must be back-filled to the safe defaults.
+	if fromVersion < 5 && c.Crypto == (CryptoConfig{}) {
+		c.Crypto = defaultCryptoConfig()
 		changed = true
 	}
 	if c.Version < CurrentConfigVersion {

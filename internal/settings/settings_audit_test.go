@@ -2,9 +2,9 @@ package settings
 
 import "testing"
 
-func TestCurrentConfigVersionIsFour(t *testing.T) {
-	if CurrentConfigVersion != 4 {
-		t.Fatalf("CurrentConfigVersion = %d, want 4", CurrentConfigVersion)
+func TestCurrentConfigVersionIsFive(t *testing.T) {
+	if CurrentConfigVersion != 5 {
+		t.Fatalf("CurrentConfigVersion = %d, want 5", CurrentConfigVersion)
 	}
 }
 
