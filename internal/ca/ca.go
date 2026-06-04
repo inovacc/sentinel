@@ -26,8 +26,8 @@ const (
 type CA struct {
 	rootCert *x509.Certificate
 	rootKey  crypto.PrivateKey
-	dir      string                   // directory where CA files are stored
-	sealer   *sentinelcrypto.Sealer   // seals/unseals rootKey on disk; passthrough by default
+	dir      string                 // directory where CA files are stored
+	sealer   *sentinelcrypto.Sealer // seals/unseals rootKey on disk; passthrough by default
 }
 
 // Init generates a new root CA with plaintext key-at-rest (backward compatible).
