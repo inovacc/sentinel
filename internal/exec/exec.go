@@ -13,6 +13,7 @@ import (
 
 	"github.com/inovacc/sentinel/internal/audit"
 	"github.com/inovacc/sentinel/internal/confine"
+	"github.com/inovacc/sentinel/internal/limits"
 	"github.com/inovacc/sentinel/internal/sandbox"
 )
 
@@ -22,7 +23,8 @@ type Runner struct {
 	confiner confine.Confiner
 	auditLog audit.Logger
 	logger   *slog.Logger
-	warnOnce sync.Once // guards the one-time "running unconfined" warning
+	recorder *limits.Recorder // limit-breach recorder (proc_rlimit); nil is safe
+	warnOnce sync.Once         // guards the one-time "running unconfined" warning
 }
 
 // NewRunner creates a command runner with sandbox enforcement.
@@ -39,6 +41,41 @@ func NewRunnerWithConfiner(sb *sandbox.Sandbox, c confine.Confiner, al audit.Log
 		al = audit.NopLogger{}
 	}
 	return &Runner{sandbox: sb, confiner: c, auditLog: al, logger: logger}
+}
+
+// WithLimitRecorder sets the limit-breach recorder used to emit proc_rlimit
+// breaches when a confined child is killed by an OS resource limit. A nil
+// recorder is safe (no event, metric still increments via Record).
+func (r *Runner) WithLimitRecorder(rec *limits.Recorder) *Runner {
+	r.recorder = rec
+	return r
+}
+
+// confined reports whether OS confinement is actually in force for this runner.
+// proc_rlimit breaches are only emitted when confinement was applied, since an
+// rlimit kill can only originate from a confiner that set the rlimit.
+func (r *Runner) confined() bool {
+	return r.confiner != nil && r.confiner.Supported()
+}
+
+// maybeRecordRlimitKill emits a best-effort proc_rlimit breach when a confined
+// child exited via a signal consistent with an OS rlimit kill (Unix SIGKILL from
+// RLIMIT_AS OOM, or SIGXCPU from RLIMIT_CPU). This is a documented heuristic: a
+// SIGKILL may have other causes (e.g. an operator kill or the context-timeout
+// kill), so we only emit when confinement was actually applied and the runErr is
+// a signal exit. Windows uses a Job Object (its own caps) and reports no rlimit
+// signal, so rlimitSignalKill returns false there and nothing is emitted.
+func (r *Runner) maybeRecordRlimitKill(ctx context.Context, command string, runErr error) {
+	if !r.confined() || runErr == nil {
+		return
+	}
+	exitErr, ok := runErr.(*osexec.ExitError)
+	if !ok {
+		return
+	}
+	if rlimitSignalKill(exitErr.ProcessState) {
+		r.recorder.Record(ctx, limits.KindProcRlimit, command)
+	}
 }
 
 // applyConfine applies the confiner to a started process, returning an error
@@ -148,6 +185,9 @@ func (r *Runner) Run(ctx context.Context, req *RunRequest) (*RunResult, error) {
 	if runErr != nil {
 		if exitErr, ok := runErr.(*osexec.ExitError); ok {
 			result.ExitCode = exitErr.ExitCode()
+			// Best-effort: a confined child killed by an OS rlimit shows up here
+			// as a signal exit; record the proc_rlimit breach (heuristic).
+			r.maybeRecordRlimitKill(ctx, req.Command, runErr)
 		} else {
 			return nil, fmt.Errorf("exec: run command: %w", runErr)
 		}
@@ -249,6 +289,9 @@ func (r *Runner) RunStream(ctx context.Context, req *RunRequest, onOutput func(s
 	if runErr != nil {
 		if exitErr, ok := runErr.(*osexec.ExitError); ok {
 			result.ExitCode = exitErr.ExitCode()
+			// Best-effort proc_rlimit breach for a confined child killed by an
+			// OS rlimit (signal exit). See maybeRecordRlimitKill.
+			r.maybeRecordRlimitKill(ctx, req.Command, runErr)
 		} else {
 			return nil, fmt.Errorf("exec: wait command: %w", runErr)
 		}

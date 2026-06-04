@@ -64,8 +64,23 @@ func (l *connLimitListener) Accept() (net.Conn, error) {
 		// Acquire a global slot before blocking on the underlying Accept (T2.6).
 		// This way, when a countedConn is closed and releases its token, a
 		// goroutine already waiting here unblocks immediately.
+		//
+		// The global cap is back-pressure (block), not a drop: we never lose an
+		// admitted connection. But a saturated cap is still a breach worth
+		// observing, so we do a non-blocking probe first and, when the semaphore
+		// is full, emit the conn_cap breach (once per saturated Accept) before
+		// falling back to the blocking acquire. This records the DoS signal
+		// without weakening the limit or changing the back-pressure behavior.
 		if l.sem != nil {
-			l.sem <- struct{}{}
+			select {
+			case l.sem <- struct{}{}:
+				// Slot was immediately available; no breach.
+			default:
+				// Global cap saturated — record the breach, then block until a
+				// slot frees (preserving back-pressure semantics).
+				l.recorder.Record(context.TODO(), limits.KindConnCap, l.Listener.Addr().String())
+				l.sem <- struct{}{}
+			}
 		}
 
 		raw, err := l.Listener.Accept()

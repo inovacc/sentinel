@@ -276,14 +276,15 @@ func buildDaemon(ctx context.Context) (*daemon, error) {
 	rl := sentinelgrpc.NewRateLimiter(cfg.Limits.RPCRatePerSec, time.Second)
 	policy := rbac.NewPolicy()
 	d.grpcServer, err = sentinelgrpc.NewServer(certPEM, keyPEM, authority.RootCertPEM(), policy, auditLog,
-		sentinelgrpc.WithRateLimiter(rl),
+		sentinelgrpc.WithRateLimiter(rl, d.limitRecorder),
 		sentinelgrpc.WithMaxRecvMsgSize(cfg.Limits.MaxRecvMsgBytes),
 		sentinelgrpc.WithMaxConcurrentStreams(cfg.Limits.MaxConcurrentStreams),
+		sentinelgrpc.WithMsgSizeRecorder(d.limitRecorder),
 	)
 	if err != nil {
 		return d, fmt.Errorf("init gRPC server: %w", err)
 	}
-	registerServices(d.grpcServer, sb, sessionMgr, d.workerPool, confiner, auditLog, logger)
+	registerServices(d.grpcServer, sb, sessionMgr, d.workerPool, confiner, auditLog, d.limitRecorder, logger)
 
 	return d, nil
 }
@@ -653,8 +654,8 @@ func startDiscoveryBeacon(logger *slog.Logger, deviceID, bootstrapAddr string, w
 }
 
 // registerServices registers every gRPC service on the server.
-func registerServices(grpcServer *sentinelgrpc.Server, sb *sandbox.Sandbox, sessionMgr *session.Manager, pool *worker.Pool, confiner confine.Confiner, auditLog audit.Logger, logger *slog.Logger) {
-	runner := exec.NewRunnerWithConfiner(sb, confiner, auditLog, logger)
+func registerServices(grpcServer *sentinelgrpc.Server, sb *sandbox.Sandbox, sessionMgr *session.Manager, pool *worker.Pool, confiner confine.Confiner, auditLog audit.Logger, limitRecorder *limits.Recorder, logger *slog.Logger) {
+	runner := exec.NewRunnerWithConfiner(sb, confiner, auditLog, logger).WithLimitRecorder(limitRecorder)
 	fsSvc := fs.NewService(sb)
 	payloadRegistry := payload.NewRegistry()
 

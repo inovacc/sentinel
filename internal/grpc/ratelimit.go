@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/inovacc/sentinel/internal/limits"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -85,8 +86,9 @@ func clientIDFromContext(ctx context.Context) string {
 
 // UnaryRateLimitInterceptor returns a gRPC unary server interceptor that
 // enforces per-client rate limits. When the limit is exceeded it returns
-// codes.ResourceExhausted.
-func UnaryRateLimitInterceptor(rl *RateLimiter) grpc.UnaryServerInterceptor {
+// codes.ResourceExhausted and records an rpc_rate breach (kind=rpc_rate,
+// source=client id). A nil recorder is safe (metric still increments, no event).
+func UnaryRateLimitInterceptor(rl *RateLimiter, rec *limits.Recorder) grpc.UnaryServerInterceptor {
 	return func(
 		ctx context.Context,
 		req any,
@@ -95,6 +97,7 @@ func UnaryRateLimitInterceptor(rl *RateLimiter) grpc.UnaryServerInterceptor {
 	) (any, error) {
 		clientID := clientIDFromContext(ctx)
 		if !rl.Allow(clientID) {
+			rec.Record(ctx, limits.KindRPCRate, clientID)
 			return nil, status.Errorf(codes.ResourceExhausted, "rate limit exceeded for %s", clientID)
 		}
 		return handler(ctx, req)
@@ -103,8 +106,8 @@ func UnaryRateLimitInterceptor(rl *RateLimiter) grpc.UnaryServerInterceptor {
 
 // StreamRateLimitInterceptor returns a gRPC stream server interceptor that
 // enforces per-client rate limits. When the limit is exceeded it returns
-// codes.ResourceExhausted.
-func StreamRateLimitInterceptor(rl *RateLimiter) grpc.StreamServerInterceptor {
+// codes.ResourceExhausted and records an rpc_rate breach. A nil recorder is safe.
+func StreamRateLimitInterceptor(rl *RateLimiter, rec *limits.Recorder) grpc.StreamServerInterceptor {
 	return func(
 		srv any,
 		ss grpc.ServerStream,
@@ -113,17 +116,20 @@ func StreamRateLimitInterceptor(rl *RateLimiter) grpc.StreamServerInterceptor {
 	) error {
 		clientID := clientIDFromContext(ss.Context())
 		if !rl.Allow(clientID) {
+			rec.Record(ss.Context(), limits.KindRPCRate, clientID)
 			return status.Errorf(codes.ResourceExhausted, "rate limit exceeded for %s", clientID)
 		}
 		return handler(srv, ss)
 	}
 }
 
-// WithRateLimiter returns an Option that adds rate limiting interceptors
-// (both unary and stream) to the gRPC server interceptor chain.
-func WithRateLimiter(rl *RateLimiter) Option {
+// WithRateLimiter returns an Option that adds rate limiting interceptors (both
+// unary and stream) to the gRPC server interceptor chain. The optional recorder
+// emits the rpc_rate breach contract on every rejection; pass nil to disable
+// breach recording (the limit is still enforced).
+func WithRateLimiter(rl *RateLimiter, rec *limits.Recorder) Option {
 	return func(c *serverConfig) {
-		c.extraUnaryInterceptors = append(c.extraUnaryInterceptors, UnaryRateLimitInterceptor(rl))
-		c.extraStreamInterceptors = append(c.extraStreamInterceptors, StreamRateLimitInterceptor(rl))
+		c.extraUnaryInterceptors = append(c.extraUnaryInterceptors, UnaryRateLimitInterceptor(rl, rec))
+		c.extraStreamInterceptors = append(c.extraStreamInterceptors, StreamRateLimitInterceptor(rl, rec))
 	}
 }
