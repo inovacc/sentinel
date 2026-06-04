@@ -16,8 +16,8 @@ var _ v1.SessionServiceServer = (*SessionServiceImpl)(nil)
 // SessionServiceImpl implements the SessionService gRPC service.
 type SessionServiceImpl struct {
 	v1.UnimplementedSessionServiceServer
-	mgr             *session.Manager
-	isRevoked       func(deviceID string) bool // optional; nil means no revocation check
+	mgr       *session.Manager
+	isRevoked func(deviceID string) bool // optional; nil means no revocation check
 }
 
 // NewSessionService creates a SessionService backed by the given manager.
