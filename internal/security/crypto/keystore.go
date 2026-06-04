@@ -31,8 +31,19 @@ const (
 )
 
 // The default service/account names under which the DEK is stored.
-// These are referenced by manager.go (Task 3); nolint until that file exists.
 const (
-	keystoreService = "sentinel-ca" //nolint:unused
-	keystoreAccount = "dek"         //nolint:unused
+	keystoreService = "sentinel-ca"
+	keystoreAccount = "dek"
 )
+
+// probeKeystore reports whether a backend round-trips a benign probe secret. A
+// backend/D-Bus/CredMan error means unavailable (e.g. headless Linux with no
+// Secret Service) → caller falls back to the passphrase mode.
+func probeKeystore(ks KeyStore) bool {
+	const probeAcct = "availability-probe"
+	if err := ks.Set(keystoreService, probeAcct, []byte("1")); err != nil {
+		return false
+	}
+	_ = ks.Delete(keystoreService, probeAcct)
+	return true
+}
