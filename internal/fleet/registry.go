@@ -42,6 +42,12 @@ type Device struct {
 	// CACertPEM is the PEM of the CA certificate pinned at pairing time. It is
 	// the trust root used to verify this specific peer's mTLS chain.
 	CACertPEM []byte `json:"-"`
+
+	// Revoked marks a device whose certificate is no longer accepted at the mTLS
+	// handshake (T8.4 local revocation). RevokedAt/RevokedReason are set by Revoke.
+	Revoked       bool      `json:"revoked"`
+	RevokedAt     time.Time `json:"revoked_at,omitempty"`
+	RevokedReason string    `json:"revoked_reason,omitempty"`
 }
 
 // Option configures a Registry.
@@ -104,7 +110,10 @@ CREATE TABLE IF NOT EXISTS fleet_devices (
     created_at     INTEGER NOT NULL,
     metadata       TEXT DEFAULT '{}',
     ca_fingerprint TEXT NOT NULL DEFAULT '',
-    ca_cert_pem    BLOB
+    ca_cert_pem    BLOB,
+    revoked        INTEGER NOT NULL DEFAULT 0,
+    revoked_at     TEXT,
+    reason         TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_fleet_status ON fleet_devices(status);
 `
@@ -116,6 +125,9 @@ CREATE INDEX IF NOT EXISTS idx_fleet_status ON fleet_devices(status);
 	for _, c := range []struct{ name, ddl string }{
 		{"ca_fingerprint", "ALTER TABLE fleet_devices ADD COLUMN ca_fingerprint TEXT NOT NULL DEFAULT ''"},
 		{"ca_cert_pem", "ALTER TABLE fleet_devices ADD COLUMN ca_cert_pem BLOB"},
+		{"revoked", "ALTER TABLE fleet_devices ADD COLUMN revoked INTEGER NOT NULL DEFAULT 0"},
+		{"revoked_at", "ALTER TABLE fleet_devices ADD COLUMN revoked_at TEXT"},
+		{"reason", "ALTER TABLE fleet_devices ADD COLUMN reason TEXT"},
 	} {
 		has, err := r.hasColumn("fleet_devices", c.name)
 		if err != nil {
@@ -229,7 +241,7 @@ func (r *Registry) Remove(deviceID string) error {
 // Get returns a device by ID.
 func (r *Registry) Get(deviceID string) (*Device, error) {
 	row := r.db.QueryRow(
-		`SELECT device_id, hostname, os, arch, role, status, address, cert_pem, last_seen_at, created_at, metadata, ca_fingerprint, ca_cert_pem
+		`SELECT device_id, hostname, os, arch, role, status, address, cert_pem, last_seen_at, created_at, metadata, ca_fingerprint, ca_cert_pem, revoked, revoked_at, reason
 		 FROM fleet_devices WHERE device_id = ?`, deviceID,
 	)
 	return scanDevice(row)
@@ -241,12 +253,12 @@ func (r *Registry) List(statusFilter DeviceStatus) ([]Device, error) {
 	var err error
 	if statusFilter != "" {
 		rows, err = r.db.Query(
-			`SELECT device_id, hostname, os, arch, role, status, address, cert_pem, last_seen_at, created_at, metadata, ca_fingerprint, ca_cert_pem
+			`SELECT device_id, hostname, os, arch, role, status, address, cert_pem, last_seen_at, created_at, metadata, ca_fingerprint, ca_cert_pem, revoked, revoked_at, reason
 			 FROM fleet_devices WHERE status = ? ORDER BY last_seen_at DESC`, string(statusFilter),
 		)
 	} else {
 		rows, err = r.db.Query(
-			`SELECT device_id, hostname, os, arch, role, status, address, cert_pem, last_seen_at, created_at, metadata, ca_fingerprint, ca_cert_pem
+			`SELECT device_id, hostname, os, arch, role, status, address, cert_pem, last_seen_at, created_at, metadata, ca_fingerprint, ca_cert_pem, revoked, revoked_at, reason
 			 FROM fleet_devices ORDER BY last_seen_at DESC`,
 		)
 	}
@@ -314,13 +326,22 @@ func scanDevice(row *sql.Row) (*Device, error) {
 	d := &Device{}
 	var lastSeen, created int64
 	var meta string
-	err := row.Scan(&d.DeviceID, &d.Hostname, &d.OS, &d.Arch, &d.Role, &d.Status, &d.Address, &d.CertPEM, &lastSeen, &created, &meta, &d.CAFingerprint, &d.CACertPEM)
+	var revoked int
+	var revokedAt, reason sql.NullString
+	err := row.Scan(&d.DeviceID, &d.Hostname, &d.OS, &d.Arch, &d.Role, &d.Status, &d.Address, &d.CertPEM, &lastSeen, &created, &meta, &d.CAFingerprint, &d.CACertPEM, &revoked, &revokedAt, &reason)
 	if err != nil {
 		return nil, fmt.Errorf("fleet: scan device: %w", err)
 	}
 	d.LastSeenAt = time.Unix(lastSeen, 0)
 	d.CreatedAt = time.Unix(created, 0)
 	_ = json.Unmarshal([]byte(meta), &d.Metadata)
+	d.Revoked = revoked != 0
+	if revokedAt.Valid && revokedAt.String != "" {
+		if ts, perr := time.Parse(time.RFC3339, revokedAt.String); perr == nil {
+			d.RevokedAt = ts
+		}
+	}
+	d.RevokedReason = reason.String
 	return d, nil
 }
 
@@ -328,13 +349,22 @@ func scanDeviceRow(rows *sql.Rows) (*Device, error) {
 	d := &Device{}
 	var lastSeen, created int64
 	var meta string
-	err := rows.Scan(&d.DeviceID, &d.Hostname, &d.OS, &d.Arch, &d.Role, &d.Status, &d.Address, &d.CertPEM, &lastSeen, &created, &meta, &d.CAFingerprint, &d.CACertPEM)
+	var revoked int
+	var revokedAt, reason sql.NullString
+	err := rows.Scan(&d.DeviceID, &d.Hostname, &d.OS, &d.Arch, &d.Role, &d.Status, &d.Address, &d.CertPEM, &lastSeen, &created, &meta, &d.CAFingerprint, &d.CACertPEM, &revoked, &revokedAt, &reason)
 	if err != nil {
 		return nil, fmt.Errorf("fleet: scan device row: %w", err)
 	}
 	d.LastSeenAt = time.Unix(lastSeen, 0)
 	d.CreatedAt = time.Unix(created, 0)
 	_ = json.Unmarshal([]byte(meta), &d.Metadata)
+	d.Revoked = revoked != 0
+	if revokedAt.Valid && revokedAt.String != "" {
+		if ts, perr := time.Parse(time.RFC3339, revokedAt.String); perr == nil {
+			d.RevokedAt = ts
+		}
+	}
+	d.RevokedReason = reason.String
 	return d, nil
 }
 
@@ -390,6 +420,74 @@ func (r *Registry) SetCAPin(deviceID, fingerprint string, caCertPEM []byte) erro
 		return fmt.Errorf("fleet: device %s not found", deviceID)
 	}
 	return nil
+}
+
+// Revoke marks a device revoked and records the reason + timestamp. It emits the
+// critical device.revoked audit event and fails closed: on audit-write failure
+// the device is NOT revoked (so the action is never applied unrecorded).
+func (r *Registry) Revoke(deviceID, reason string) error {
+	if _, err := r.Get(deviceID); err != nil {
+		return fmt.Errorf("fleet: revoke: %w", err)
+	}
+	if aerr := r.auditLog.Record(context.Background(), audit.Event{
+		Type:    audit.EventDeviceRevoked,
+		Outcome: audit.OutcomeAllow,
+		Target:  deviceID,
+		Detail:  map[string]any{"device_id": deviceID, "reason": reason},
+	}); aerr != nil {
+		return fmt.Errorf("fleet: refusing to revoke device unaudited: %w", aerr)
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	res, err := r.db.Exec(
+		`UPDATE fleet_devices SET revoked = 1, revoked_at = ?, reason = ? WHERE device_id = ?`,
+		now, reason, deviceID,
+	)
+	if err != nil {
+		return fmt.Errorf("fleet: revoke device: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("fleet: device %s not found", deviceID)
+	}
+	return nil
+}
+
+// Unrevoke clears a device's revoked state. It emits the critical
+// device.unrevoked event and fails closed.
+func (r *Registry) Unrevoke(deviceID string) error {
+	if _, err := r.Get(deviceID); err != nil {
+		return fmt.Errorf("fleet: unrevoke: %w", err)
+	}
+	if aerr := r.auditLog.Record(context.Background(), audit.Event{
+		Type:    audit.EventDeviceUnrevoked,
+		Outcome: audit.OutcomeAllow,
+		Target:  deviceID,
+		Detail:  map[string]any{"device_id": deviceID},
+	}); aerr != nil {
+		return fmt.Errorf("fleet: refusing to unrevoke device unaudited: %w", aerr)
+	}
+	res, err := r.db.Exec(
+		`UPDATE fleet_devices SET revoked = 0, revoked_at = NULL, reason = NULL WHERE device_id = ?`,
+		deviceID,
+	)
+	if err != nil {
+		return fmt.Errorf("fleet: unrevoke device: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("fleet: device %s not found", deviceID)
+	}
+	return nil
+}
+
+// IsRevoked reports whether the device is currently revoked. An unknown device
+// is reported not-revoked (the handshake's CA/pin checks reject unknowns).
+func (r *Registry) IsRevoked(deviceID string) bool {
+	var revoked int
+	if err := r.db.QueryRow(
+		`SELECT revoked FROM fleet_devices WHERE device_id = ?`, deviceID,
+	).Scan(&revoked); err != nil {
+		return false
+	}
+	return revoked != 0
 }
 
 // fingerprintPrefix returns a short, non-secret prefix of a CA fingerprint for
