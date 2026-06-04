@@ -13,6 +13,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	sentinelcrypto "github.com/inovacc/sentinel/internal/security/crypto"
 )
 
 const (
@@ -24,12 +26,17 @@ const (
 type CA struct {
 	rootCert *x509.Certificate
 	rootKey  crypto.PrivateKey
-	dir      string // directory where CA files are stored
+	dir      string                   // directory where CA files are stored
+	sealer   *sentinelcrypto.Sealer   // seals/unseals rootKey on disk; passthrough by default
 }
 
-// Init generates a new root CA (P-256 ECDSA), saves cert+key to dir.
-// Root cert is valid for 10 years. Returns an error if the CA already exists.
-func Init(dir string) (*CA, error) {
+// Init generates a new root CA with plaintext key-at-rest (backward compatible).
+func Init(dir string) (*CA, error) { return InitWithSealer(dir, passthroughSealer()) }
+
+// InitWithSealer generates a new root CA (P-256 ECDSA), saves cert+key to dir,
+// sealing the key with sealer. Root cert is valid for 10 years.
+// Returns an error if the CA already exists.
+func InitWithSealer(dir string, sealer *sentinelcrypto.Sealer) (*CA, error) {
 	certPath := filepath.Join(dir, caCertFile)
 	keyPath := filepath.Join(dir, caKeyFile)
 
@@ -83,19 +90,19 @@ func Init(dir string) (*CA, error) {
 		return nil, fmt.Errorf("ca: write cert: %w", err)
 	}
 
-	if err := writeKeyPEM(keyPath, key); err != nil {
+	if err := writeKeyPEMSealed(keyPath, key, sealer); err != nil {
 		return nil, fmt.Errorf("ca: write key: %w", err)
 	}
 
-	return &CA{
-		rootCert: cert,
-		rootKey:  key,
-		dir:      dir,
-	}, nil
+	return &CA{rootCert: cert, rootKey: key, dir: dir, sealer: sealer}, nil
 }
 
-// Load reads an existing CA from dir.
-func Load(dir string) (*CA, error) {
+// Load reads an existing CA, plaintext key-at-rest (backward compatible).
+func Load(dir string) (*CA, error) { return LoadWithSealer(dir, passthroughSealer()) }
+
+// LoadWithSealer reads an existing CA, unsealing the key with sealer and
+// verifying the cert matches the key. It fails closed and never regenerates.
+func LoadWithSealer(dir string, sealer *sentinelcrypto.Sealer) (*CA, error) {
 	certPath := filepath.Join(dir, caCertFile)
 	keyPath := filepath.Join(dir, caKeyFile)
 
@@ -103,36 +110,30 @@ func Load(dir string) (*CA, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ca: read cert: %w", err)
 	}
-
-	keyPEM, err := os.ReadFile(keyPath)
-	if err != nil {
-		return nil, fmt.Errorf("ca: read key: %w", err)
-	}
-
 	cert, err := decodeCertPEM(certPEM)
 	if err != nil {
 		return nil, fmt.Errorf("ca: decode cert: %w", err)
 	}
-
-	key, err := decodeKeyPEM(keyPEM)
+	key, err := loadKeyPEMSealed(keyPath, sealer)
 	if err != nil {
-		return nil, fmt.Errorf("ca: decode key: %w", err)
+		return nil, err
 	}
-
-	return &CA{
-		rootCert: cert,
-		rootKey:  key,
-		dir:      dir,
-	}, nil
+	c := &CA{rootCert: cert, rootKey: key, dir: dir, sealer: sealer}
+	if err := certKeyMatch(c); err != nil {
+		return nil, err
+	}
+	return c, nil
 }
 
 // LoadOrInit loads if exists, initializes if not.
-func LoadOrInit(dir string) (*CA, error) {
-	certPath := filepath.Join(dir, caCertFile)
-	if _, err := os.Stat(certPath); err == nil {
-		return Load(dir)
+func LoadOrInit(dir string) (*CA, error) { return LoadOrInitWithSealer(dir, passthroughSealer()) }
+
+// LoadOrInitWithSealer loads if exists, else initializes, both sealed.
+func LoadOrInitWithSealer(dir string, sealer *sentinelcrypto.Sealer) (*CA, error) {
+	if _, err := os.Stat(filepath.Join(dir, caCertFile)); err == nil {
+		return LoadWithSealer(dir, sealer)
 	}
-	return Init(dir)
+	return InitWithSealer(dir, sealer)
 }
 
 // SignDevice generates a new device keypair and signs it with the root CA.
@@ -287,12 +288,4 @@ func decodeKeyPEM(data []byte) (*ecdsa.PrivateKey, error) {
 
 func writeCertPEM(path string, der []byte) error {
 	return os.WriteFile(path, encodeCertPEM(der), 0o644)
-}
-
-func writeKeyPEM(path string, key *ecdsa.PrivateKey) error {
-	data, err := encodeKeyPEM(key)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0o600)
 }
