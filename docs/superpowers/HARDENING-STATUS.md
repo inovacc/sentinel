@@ -22,6 +22,42 @@
 
 ---
 
+## Phase 3.2 — Resource Limits & DoS Protection (2026-06-04)
+
+**Spec:** `docs/superpowers/specs/2026-06-04-dos-limits-design.md`
+**Plan:** `docs/superpowers/plans/2026-06-04-dos-limits.md`
+**Closes:** T1.3, T2.4, T2.6 (mitigated), T5.3 (fully mitigated cross-platform).
+
+Makes the daemon resilient to resource-exhaustion DoS across four vectors,
+secure-by-default and operator-tunable. One additive `settings.LimitsConfig`
+block (schema v3 → v4) holds every knob; one breach contract unifies the layers:
+reject + routine `limit.exceeded` audit event (`Detail{kind, source}`) +
+`sentinel_limit_exceeded_total` metric. The routine tier guarantees an
+audit-write failure never blocks a rejection.
+
+| What | Detail | Closes |
+|---|---|---|
+| Bootstrap per-IP throttle | concurrent + token-bucket rate per source IP, accept-then-close excess, idle-bucket sweep (`pkg/transport/bootstrap_limiter.go`) | T1.3 |
+| TLS handshake timeout + conn caps | deadline around `tls.Conn.Handshake` + global/per-device caps (`pkg/transport/connlimit.go`) | T2.6 |
+| gRPC message/stream caps + configurable rate | `MaxRecvMsgSize` (1 MiB), `MaxConcurrentStreams` (128), `RPCRatePerSec` (100, was hardcoded) | T2.4 |
+| Unix process rlimits | `RLIMIT_AS`/`RLIMIT_NOFILE`/`RLIMIT_CPU` via re-exec trampoline (`__confined-exec`), complementing the Windows Job Object | T5.3 |
+| Breach contract | `limit.exceeded` routine audit event + `sentinel_limit_exceeded_total{kind}` metric (`internal/limits`, `internal/metrics`) | — |
+| Config block + migration | `LimitsConfig` with v3 → v4 additive migration (`internal/settings`) | — |
+| Daemon wiring | `cmd/serve.go` threads limits into transport, gRPC, confiner, and the metrics server | — |
+
+**Posture:** secure-by-default (`Enabled` true); every limit overridable. Process
+confinement is now fail-closed on Windows AND Linux/macOS; warn-once no-op only on
+other unsupported platforms.
+
+**Tests:** `internal/settings/settings_limits_test.go`, `internal/limits/limits_test.go`,
+`internal/metrics/metrics_*_test.go`, `internal/grpc/server_limits_test.go`,
+`pkg/transport/bootstrap_limiter_test.go`, `pkg/transport/connlimit_test.go`,
+`internal/confine/confine_unix_test.go` (`//go:build linux`), `cmd/confined_exec_test.go`
+(`//go:build linux`), `cmd/serve_limits_test.go`. `go build`/`vet`/`test`/`golangci-lint`
+green; linux cross-build verified; the Linux rlimit test runs on a linux target.
+
+---
+
 ## 2026-06-03 — Phase 3.6 v1: OS process confinement (Windows)
 
 **Branch:** `feature/os-sandbox`
