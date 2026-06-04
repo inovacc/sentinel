@@ -1,0 +1,19 @@
+# Keep the build context to source + module files only.
+.git
+.github
+.scripts
+.idea
+.vscode
+dist
+build
+docs
+eye
+.sentinel
+*.db
+*.db-journal
+*.db-wal
+*.out
+*.test
+*.exe
+coverage*
+.remember
