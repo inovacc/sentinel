@@ -5,6 +5,23 @@
 
 ---
 
+## Phase 3.1 — Security Audit Log (2026-06-04)
+
+**Closes:** T2.5 / T7.3 (repudiation), T8.3 (audit-trail integrity).
+
+**Delivered:**
+- `internal/audit`: injected `Logger` (real `SQLiteLogger` + `NopLogger`), hash-chained tamper-evident store (`hash = "sha256:"+hex(SHA-256(canonical payload))`), `Verify` detecting edit/reorder/truncation, sealed-segment retention + prune, Detail redaction allowlist.
+- Static event catalog with compile-checked criticality; tiered fail-closed posture (critical events abort the operation, routine events log-and-continue with a once-per-window warn + `audit_write_failures_total`).
+- Emission wired into the RBAC interceptor (`rbac.allow.privileged`/`rbac.allow.read`/`rbac.deny`), exec/worker (`exec.run`, `confine.refuse`), fleet/pairing (`pairing.*`, `fleet.*`, `capin.change`, `cert.sign/renew`), sandbox (`sandbox.deny`), and daemon lifecycle (`daemon.start/stop/renew`).
+- `sentinel audit tail|query|verify|export` CLI; `AuditConfig` settings block (config schema v2 → v3).
+- Actor identity extracted from the verified peer certificate (anti-forgery), never from the request body.
+
+**Deferred to backlog:** record signing (third-party non-repudiation), gRPC `AuditService`, SIEM/remote shipping, real-time alerting.
+
+**Tests:** full TDD suite in `internal/audit/*_test.go`, `internal/grpc/interceptor_audit_test.go`, `internal/settings/settings_audit_test.go`, `cmd/audit_test.go`, `cmd/serve_audit_test.go`. `go build`/`vet`/`test` green; linux cross-build verified.
+
+---
+
 ## 2026-06-03 — Phase 3.6 v1: OS process confinement (Windows)
 
 **Branch:** `feature/os-sandbox`

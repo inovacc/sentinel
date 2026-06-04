@@ -49,7 +49,7 @@ Status: ✅ implemented, 🟡 partial, ❌ not yet (becomes Phase 3 work).
 | T2.2 | E | Cert-holder with `reader` role calls admin-only RPCs | C | RBAC interceptor enforces minimum role per method; role extracted from X.509 custom OID | `internal/grpc/interceptor.go`, `internal/ca/role.go`, `internal/rbac/` | `internal/grpc/interceptor_test.go` | ✅ |
 | T2.3 | S | Compromised cert continues to work indefinitely | H | Short-lived certs (≤30d) + CRL fetch on handshake | cert renewal (existing); CRL (Phase 3.4) | TBD | 🟡 → Phase 3.4 |
 | T2.4 | T | gRPC unary request smuggles larger-than-expected payload to exhaust memory | M | `grpc.MaxRecvMsgSize` tightened from default 4MB to per-service limit | gRPC server opts (Phase 3.2) | TBD | ❌ → Phase 3.2 |
-| T2.5 | R | Privileged action happens but operator cannot prove who did it | H | Structured audit log keyed by peer device-ID for every privileged RPC | audit logger (Phase 3.1) | TBD | ❌ → Phase 3.1 |
+| T2.5 | R | Privileged action happens but operator cannot prove who did it | H | Tamper-evident, actor-attributed, hash-chained security audit log; critical events fail-closed; `sentinel audit verify` detects edit/reorder/truncation | `internal/audit/*`, `cmd/audit.go`, RBAC interceptor emission | `internal/audit/*_test.go`, `internal/grpc/interceptor_audit_test.go` | ✅ — Phase 3.1 (2026-06-04) |
 | T2.6 | D | Attacker establishes many slow-handshake connections to exhaust file descriptors | M | TLS handshake timeout; per-device connection cap | mTLS server opts (Phase 3.2) | TBD | ❌ → Phase 3.2 |
 
 ### TB3 — MCP stdio
@@ -93,7 +93,7 @@ Status: ✅ implemented, 🟡 partial, ❌ not yet (becomes Phase 3 work).
 |----|--------|--------|-----|------------|------|------|--------|
 | T7.1 | I | Another user on the host reads sessions DB containing command history | H | Datadir is `0700`, files `0600`; documented; verify on startup | `internal/datadir/` | startup test | 🟡 — verify in audit |
 | T7.2 | T | Attacker modifies sessions DB to plant fake checkpoints | M | Integrity HMAC on session checkpoints (out of scope v1, tracked) | — | — | ❌ → Backlog |
-| T7.3 | R | No record of who started/stopped which session | M | Audit log entries for session lifecycle events | audit logger (Phase 3.1) | TBD | ❌ → Phase 3.1 |
+| T7.3 | R | No record of who started/stopped which session | M | Tamper-evident, actor-attributed, hash-chained security audit log; critical events fail-closed; `sentinel audit verify` detects edit/reorder/truncation | `internal/audit/*`, `cmd/audit.go`, RBAC interceptor emission | `internal/audit/*_test.go`, `internal/grpc/interceptor_audit_test.go` | ✅ — Phase 3.1 (2026-06-04) |
 
 ### TB8 — CA key store
 
@@ -101,7 +101,7 @@ Status: ✅ implemented, 🟡 partial, ❌ not yet (becomes Phase 3 work).
 |----|--------|--------|-----|------------|------|------|--------|
 | T8.1 | I | Local attacker reads CA private key from disk | C | Encrypt CA key at rest using OS keystore (DPAPI / Keychain / libsecret) | `internal/security/crypto/` (Phase 3.4) | TBD | ❌ → Phase 3.4 |
 | T8.2 | T | Attacker swaps CA key with their own | C | File mode `0600`; integrity HMAC checked at load; future: HSM (Backlog) | `internal/ca/` | ca_test.go | 🟡 → Phase 3.4 |
-| T8.3 | R | CA signs a cert but no record of who/when | H | Audit log entry on every cert signing | audit logger (Phase 3.1) | TBD | ❌ → Phase 3.1 |
+| T8.3 | R | CA signs a cert but no record of who/when | H | Tamper-evident, actor-attributed, hash-chained security audit log; critical events fail-closed; `sentinel audit verify` detects edit/reorder/truncation | `internal/audit/*`, `cmd/audit.go`, RBAC interceptor emission | `internal/audit/*_test.go`, `internal/grpc/interceptor_audit_test.go` | ✅ — Phase 3.1 (2026-06-04) |
 | T8.4 | E | Old long-lived cert remains valid even after device is revoked | C | CRL file served on bootstrap port; mTLS handshake consults CRL | `pkg/transport/crl.go` (Phase 3.4) | TBD | ❌ → Phase 3.4 |
 
 ### TB9 — Auto-update channel
