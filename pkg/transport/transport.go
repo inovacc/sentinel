@@ -434,8 +434,18 @@ func (m *Manager) startMTLS(ctx context.Context) error {
 		return fmt.Errorf("transport: mtls listen %s: %w", m.cfg.MTLSAddr, err)
 	}
 
+	// Wrap with connection caps + handshake timeout (T2.6) when limiting is on.
+	wrapped := net.Listener(lis)
+	if m.cfg.Limits.Enabled {
+		wrapped = newConnLimitListener(lis, connLimitOpts{
+			maxConns:         m.cfg.Limits.MaxConns,
+			perDevice:        m.cfg.Limits.PerDeviceMaxConns,
+			handshakeTimeout: m.cfg.Limits.TLSHandshakeTimeout,
+		}, m.cfg.LimitRecorder)
+	}
+
 	m.mu.Lock()
-	m.mtlsListener = lis
+	m.mtlsListener = wrapped
 	m.mu.Unlock()
 
 	m.logger.Info("transport: mTLS listener started",
