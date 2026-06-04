@@ -280,11 +280,12 @@ func buildDaemon(ctx context.Context) (*daemon, error) {
 		sentinelgrpc.WithMaxRecvMsgSize(cfg.Limits.MaxRecvMsgBytes),
 		sentinelgrpc.WithMaxConcurrentStreams(cfg.Limits.MaxConcurrentStreams),
 		sentinelgrpc.WithMsgSizeRecorder(d.limitRecorder),
+		sentinelgrpc.WithPeerVerifier(buildRevocationVerifier(registry, auditLog)),
 	)
 	if err != nil {
 		return d, fmt.Errorf("init gRPC server: %w", err)
 	}
-	registerServices(d.grpcServer, sb, sessionMgr, d.workerPool, confiner, auditLog, d.limitRecorder, logger)
+	registerServices(d.grpcServer, sb, sessionMgr, registry, d.workerPool, confiner, auditLog, d.limitRecorder, logger)
 
 	return d, nil
 }
@@ -500,6 +501,30 @@ func loadOrCreateBootstrapIdentity(certStore *transport.CertStore) (certPEM, key
 	return certPEM, keyPEM, nil
 }
 
+// buildRevocationVerifier returns an mTLS VerifyPeer hook that rejects a peer
+// whose device ID is revoked in the registry. A rejection emits pairing.reject
+// (critical) with reason="revoked"; an audit-write failure still rejects (the
+// handshake fails closed regardless).
+func buildRevocationVerifier(registry *fleet.Registry, auditLog audit.Logger) func(*x509.Certificate) error {
+	return func(leaf *x509.Certificate) error {
+		certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leaf.Raw})
+		deviceID, err := ca.DeviceID(certPEM)
+		if err != nil {
+			return fmt.Errorf("mtls: derive peer device id: %w", err)
+		}
+		if registry.IsRevoked(deviceID) {
+			_ = auditLog.Record(context.Background(), audit.Event{
+				Type:    audit.EventPairingReject,
+				Outcome: audit.OutcomeDeny,
+				Target:  deviceID,
+				Detail:  map[string]any{"device_id": deviceID, "reason": "revoked"},
+			})
+			return fmt.Errorf("mtls: peer %s is revoked", deviceID)
+		}
+		return nil
+	}
+}
+
 // buildOnPeerAccepted returns the bootstrap peer-acceptance callback. When
 // auto-accept is disabled, the peer is recorded as pending for manual approval.
 func buildOnPeerAccepted(logger *slog.Logger, registry *fleet.Registry, auditLog audit.Logger, autoAccept bool) func(string, []byte, string) (bool, error) {
@@ -654,14 +679,14 @@ func startDiscoveryBeacon(logger *slog.Logger, deviceID, bootstrapAddr string, w
 }
 
 // registerServices registers every gRPC service on the server.
-func registerServices(grpcServer *sentinelgrpc.Server, sb *sandbox.Sandbox, sessionMgr *session.Manager, pool *worker.Pool, confiner confine.Confiner, auditLog audit.Logger, limitRecorder *limits.Recorder, logger *slog.Logger) {
+func registerServices(grpcServer *sentinelgrpc.Server, sb *sandbox.Sandbox, sessionMgr *session.Manager, registry *fleet.Registry, pool *worker.Pool, confiner confine.Confiner, auditLog audit.Logger, limitRecorder *limits.Recorder, logger *slog.Logger) {
 	runner := exec.NewRunnerWithConfiner(sb, confiner, auditLog, logger).WithLimitRecorder(limitRecorder)
 	fsSvc := fs.NewService(sb)
 	payloadRegistry := payload.NewRegistry()
 
 	grpcServer.RegisterExecService(sentinelgrpc.NewExecService(runner, sessionMgr, logger))
 	grpcServer.RegisterFileSystemService(sentinelgrpc.NewFileSystemService(fsSvc, sessionMgr, auditLog))
-	grpcServer.RegisterSessionService(sentinelgrpc.NewSessionService(sessionMgr))
+	grpcServer.RegisterSessionService(sentinelgrpc.NewSessionService(sessionMgr).WithRevocationChecker(registry.IsRevoked))
 	grpcServer.RegisterPayloadService(sentinelgrpc.NewPayloadService(payloadRegistry))
 	grpcServer.RegisterWorkerService(sentinelgrpc.NewWorkerService(pool))
 	grpcServer.RegisterCaptureService(sentinelgrpc.NewCaptureService())

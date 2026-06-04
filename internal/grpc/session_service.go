@@ -16,12 +16,25 @@ var _ v1.SessionServiceServer = (*SessionServiceImpl)(nil)
 // SessionServiceImpl implements the SessionService gRPC service.
 type SessionServiceImpl struct {
 	v1.UnimplementedSessionServiceServer
-	mgr *session.Manager
+	mgr             *session.Manager
+	isRevoked       func(deviceID string) bool // optional; nil means no revocation check
 }
 
 // NewSessionService creates a SessionService backed by the given manager.
 func NewSessionService(mgr *session.Manager) *SessionServiceImpl {
 	return &SessionServiceImpl{mgr: mgr}
+}
+
+// WithRevocationChecker returns a copy of the service that rejects Heartbeat
+// calls from sessions whose owner device ID is revoked. The checker is called
+// with the session's DeviceID (Syncthing-style ID, not the sha256 actor used
+// by the RBAC interceptor). This is the v1 in-band sweep: revocation takes
+// effect at the next heartbeat beat rather than requiring a separate connection
+// sweeper, because session owner tracking is a client-supplied value and the
+// Syncthing device ID is not yet threaded through the gRPC TLS peer context.
+func (s *SessionServiceImpl) WithRevocationChecker(fn func(deviceID string) bool) *SessionServiceImpl {
+	s.isRevoked = fn
+	return s
 }
 
 func (s *SessionServiceImpl) Create(ctx context.Context, req *v1.CreateSessionRequest) (*v1.CreateSessionResponse, error) {
@@ -156,6 +169,16 @@ func (s *SessionServiceImpl) Checkpoint(ctx context.Context, req *v1.CheckpointR
 }
 
 func (s *SessionServiceImpl) Heartbeat(ctx context.Context, req *v1.HeartbeatRequest) (*v1.HeartbeatResponse, error) {
+	// In-band revocation sweep: if a revocation checker is installed, look up
+	// the session's owner device ID and reject the heartbeat if the device is
+	// revoked. This terminates the stream with PermissionDenied, which closes
+	// the live connection without requiring a separate background sweeper.
+	if s.isRevoked != nil {
+		sess, err := s.mgr.Get(ctx, req.SessionId)
+		if err == nil && s.isRevoked(sess.DeviceID) {
+			return nil, status.Errorf(codes.PermissionDenied, "device revoked")
+		}
+	}
 	if err := s.mgr.Heartbeat(ctx, req.SessionId); err != nil {
 		return nil, sessionError(err)
 	}

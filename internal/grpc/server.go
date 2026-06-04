@@ -9,6 +9,7 @@ import (
 	v1 "github.com/inovacc/sentinel/internal/api/v1"
 	"github.com/inovacc/sentinel/internal/audit"
 	"github.com/inovacc/sentinel/internal/rbac"
+	"github.com/inovacc/sentinel/pkg/transport"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 )
@@ -20,6 +21,7 @@ type serverConfig struct {
 	extraUnaryInterceptors  []grpc.UnaryServerInterceptor
 	extraStreamInterceptors []grpc.StreamServerInterceptor
 	grpcOpts                []grpc.ServerOption
+	peerVerifier            func(*x509.Certificate) error
 }
 
 // WithUnaryInterceptor adds an additional unary interceptor to the chain.
@@ -61,6 +63,15 @@ func WithMaxConcurrentStreams(n uint32) Option {
 	}
 }
 
+// WithPeerVerifier installs a callback that is invoked during the mTLS
+// handshake with the peer's verified leaf certificate. Returning an error
+// rejects the connection (used for local revocation check, Task 8b).
+func WithPeerVerifier(fn func(*x509.Certificate) error) Option {
+	return func(c *serverConfig) {
+		c.peerVerifier = fn
+	}
+}
+
 // Server wraps a gRPC server with mTLS and interceptors.
 type Server struct {
 	grpcServer *grpc.Server
@@ -77,26 +88,20 @@ func NewServer(certPEM, keyPEM, caCertPEM []byte, policy *rbac.Policy, auditLogg
 	if auditLogger == nil {
 		auditLogger = audit.NopLogger{}
 	}
-	cert, err := tls.X509KeyPair(certPEM, keyPEM)
-	if err != nil {
-		return nil, fmt.Errorf("grpc: load server keypair: %w", err)
-	}
-
-	caPool := x509.NewCertPool()
-	if !caPool.AppendCertsFromPEM(caCertPEM) {
-		return nil, fmt.Errorf("grpc: failed to parse CA certificate")
-	}
-
-	tlsCfg := &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		ClientAuth:   tls.RequireAndVerifyClientCert,
-		ClientCAs:    caPool,
-		MinVersion:   tls.VersionTLS13,
-	}
 
 	cfg := &serverConfig{}
 	for _, o := range opts {
 		o(cfg)
+	}
+
+	tlsCfg, err := transport.NewMTLSServerConfig(transport.MTLSConfig{
+		CertPEM:    certPEM,
+		KeyPEM:     keyPEM,
+		CACertPEM:  caCertPEM,
+		VerifyPeer: cfg.peerVerifier,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("grpc: %w", err)
 	}
 
 	// Build interceptor chains: RBAC first, then any extras.
