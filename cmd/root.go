@@ -63,6 +63,8 @@ func init() {
 		newDiscoverCmd(),
 		newConnectCmd(),
 		newRenewCmd(),
+		newRevokeCmd(),
+		newUnrevokeCmd(),
 		newDoctorCmd(),
 		newVersionCmd(),
 		newAuditCmd(),
