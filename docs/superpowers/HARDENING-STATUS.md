@@ -58,6 +58,48 @@ green; linux cross-build verified; the Linux rlimit test runs on a linux target.
 
 ---
 
+## Phase 3.4 — Crypto Hardening (2026-06-04)
+
+**Spec:** `docs/superpowers/specs/2026-06-04-crypto-hardening-design.md`
+**Plan:** `docs/superpowers/plans/2026-06-04-crypto-hardening.md`
+**Spike:** `docs/superpowers/spikes/2026-06-04-ca-key-keystore.md`
+**Closes:** T8.1, T8.2 (CA key compromise), T8.4 (revocation), T2.3 (cert lifetime).
+
+Protects the CA private key at rest with envelope encryption and limits the blast
+radius of a stale or compromised device cert. A new `internal/security/crypto`
+package owns key-at-rest: a random 32-byte DEK encrypts `ca.key` with AES-256-GCM;
+the DEK lives in the OS keystore, or — on headless hosts — is wrapped by an
+argon2id-derived key from an operator passphrase. The daemon fails closed and
+never regenerates the CA.
+
+| What | Detail | Closes |
+|---|---|---|
+| Envelope encryption | AES-256-GCM over the CA key; DEK in `KeyStore` (`internal/security/crypto`) | T8.1 |
+| Tamper + swap detection | GCM auth tag + cert/key public-key match at load | T8.2 |
+| Passphrase fallback | argon2id-wrapped DEK in `ca.key.dek` (`passphrase-env`/`-file`) | T8.1 (headless) |
+| Plaintext → encrypted migration | in-place, idempotent, `ca.key.plaintext.bak` (0600), abort-safe | — |
+| Local revocation | fleet `revoked`/`revoked_at`/`reason` columns; mTLS `VerifyPeer` rejects revoked peers; live-session close | T8.4 |
+| Short-lived certs + auto-renew | `CertValidity` (720h) issuance; own-cert auto-renew under `RenewThreshold` (240h) | T2.3 |
+| Config block + migration | `CryptoConfig` (schema v4 → v5) | — |
+| Audit + doctor | `device.revoked/unrevoked`, `cakey.sealed/unseal_failed`, `cert.autorenew`; `checkCAKeyAtRest` | — |
+| CLI | `sentinel revoke`/`unrevoke`; `fleet list` shows revoked | — |
+
+**Posture:** secure-by-default (`key_encryption=keystore`); `off` allowed for dev
+with a loud warning. Fail-closed unseal — a wrong key/passphrase aborts startup
+with an `internal/clierr` remediation, never a silent CA regeneration.
+
+**Deferred to backlog:** HSM/TPM-backed CA key, OCSP, distributed CRL, automatic
+peer-cert renewal (peer certs warn and reuse `sentinel renew`).
+
+**Tests:** `internal/security/crypto/*_test.go` (fake keystore; real-keystore
+smoke `//go:build keystore_smoke`), `internal/ca/sealedkey_test.go`,
+`internal/ca/validity_test.go`, `internal/fleet/registry_revoke_test.go`,
+`pkg/transport/mtls_revoke_test.go`, `internal/settings/settings_crypto_test.go`,
+`cmd/revoke_test.go`, `cmd/autorenew_test.go`, `cmd/serve_revoke_test.go`.
+`go build`/`vet`/`test`/`golangci-lint` green; linux cross-build verified.
+
+---
+
 ## 2026-06-03 — Phase 3.6 v1: OS process confinement (Windows)
 
 **Branch:** `feature/os-sandbox`
