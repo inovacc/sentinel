@@ -192,9 +192,24 @@ func buildDaemon(ctx context.Context) (*daemon, error) {
 	}
 	d.addCleanup(func() { _ = serverinfo.RemovePID(datadir.Root()) })
 
+	// Build the audit logger early so unseal failures (both buildSealer and
+	// loadDeviceIdentity) can emit cakey.unseal_failed before returning.
+	// The handle is closed by the cleanup registered in the late-wiring block
+	// below; on an early-fatal return the OS reclaims the handle automatically.
+	earlyAuditLog, earlyAuditErr := buildAuditLogger(cfg, logger)
+	if earlyAuditErr != nil {
+		return d, earlyAuditErr
+	}
+
 	sealer, err := buildSealer(cfg)
 	if err != nil {
 		if d2, ok := clierr.ClassifyCAUnseal(err); ok {
+			_ = earlyAuditLog.Record(context.Background(), audit.Event{
+				Type:    audit.EventCAKeyUnsealFail,
+				Outcome: audit.OutcomeDeny,
+				Target:  "ca.key",
+				Detail:  map[string]any{"error": err.Error()},
+			})
 			return d, fmt.Errorf("%s", d2.Error())
 		}
 		return d, fmt.Errorf("build CA sealer: %w", err)
@@ -208,7 +223,7 @@ func buildDaemon(ctx context.Context) (*daemon, error) {
 		logger.Info("initialized new CA and device identity")
 	}
 
-	authority, certPEM, keyPEM, certDir, deviceID, err := loadDeviceIdentity(sealer)
+	authority, certPEM, keyPEM, certDir, deviceID, err := loadDeviceIdentity(sealer, earlyAuditLog)
 	if err != nil {
 		return d, err
 	}
@@ -271,10 +286,9 @@ func buildDaemon(ctx context.Context) (*daemon, error) {
 		logger.Info("recovered interrupted sessions", "count", recovered)
 	}
 
-	auditLog, err := buildAuditLogger(cfg, logger)
-	if err != nil {
-		return d, err
-	}
+	// The audit logger was already opened early for unseal-failure tracing;
+	// reuse it rather than opening a second handle.
+	auditLog := earlyAuditLog
 	d.auditLog = auditLog
 	d.limitRecorder = limits.NewRecorder(auditLog)
 	// The registry is constructed before the audit logger exists (see ordering
@@ -392,8 +406,9 @@ func buildSealer(cfg *settings.Config) (*sentinelcrypto.Sealer, error) {
 
 // loadDeviceIdentity loads the fleet CA and the device's signed certificate and
 // key from the data directory, and derives the device ID. The sealer is used to
-// unseal the CA key at rest; a nil sealer falls back to plaintext.
-func loadDeviceIdentity(sealer *sentinelcrypto.Sealer) (authority *ca.CA, certPEM, keyPEM []byte, certDir, deviceID string, err error) {
+// unseal the CA key at rest; a nil sealer falls back to plaintext. auditLog is
+// used to emit cakey.unseal_failed (critical) before returning on unseal error.
+func loadDeviceIdentity(sealer *sentinelcrypto.Sealer, auditLog audit.Logger) (authority *ca.CA, certPEM, keyPEM []byte, certDir, deviceID string, err error) {
 	caDir, err := datadir.CADir()
 	if err != nil {
 		return nil, nil, nil, "", "", fmt.Errorf("ca dir: %w", err)
@@ -405,6 +420,12 @@ func loadDeviceIdentity(sealer *sentinelcrypto.Sealer) (authority *ca.CA, certPE
 	}
 	if err != nil {
 		if d2, ok := clierr.ClassifyCAUnseal(err); ok {
+			_ = auditLog.Record(context.Background(), audit.Event{
+				Type:    audit.EventCAKeyUnsealFail,
+				Outcome: audit.OutcomeDeny,
+				Target:  "ca.key",
+				Detail:  map[string]any{"error": err.Error()},
+			})
 			return nil, nil, nil, "", "", fmt.Errorf("%s", d2.Error())
 		}
 		return nil, nil, nil, "", "", fmt.Errorf("load CA (run 'sentinel ca init' first): %w", err)
