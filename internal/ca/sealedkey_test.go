@@ -8,6 +8,79 @@ import (
 	"github.com/inovacc/sentinel/internal/security/crypto"
 )
 
+func TestMigrateEncryptsPlaintextKey(t *testing.T) {
+	dir := t.TempDir()
+	// Create a plaintext CA (passthrough sealer writes PEM).
+	if _, err := Init(dir); err != nil {
+		t.Fatalf("Init plaintext: %v", err)
+	}
+	keyPath := filepath.Join(dir, caKeyFile)
+	raw, _ := os.ReadFile(keyPath)
+	if crypto.IsEnvelope(raw) {
+		t.Fatal("precondition: key should be plaintext")
+	}
+
+	sealer, _ := crypto.NewSealer(crypto.Options{Mode: crypto.ModeKeystore, KeyStore: crypto.NewFakeKeyStore()})
+	migrated, err := MigrateKeyAtRest(dir, sealer)
+	if err != nil {
+		t.Fatalf("MigrateKeyAtRest: %v", err)
+	}
+	if !migrated {
+		t.Fatal("expected migration to occur")
+	}
+	enc, _ := os.ReadFile(keyPath)
+	if !crypto.IsEnvelope(enc) {
+		t.Fatal("key not encrypted after migration")
+	}
+	bak, err := os.ReadFile(keyPath + ".plaintext.bak")
+	if err != nil {
+		t.Fatalf("backup missing: %v", err)
+	}
+	if !cryptoEqual(bak, raw) {
+		t.Fatal("backup does not match original plaintext")
+	}
+
+	// Idempotent: a second migration is a no-op.
+	again, err := MigrateKeyAtRest(dir, sealer)
+	if err != nil {
+		t.Fatalf("second MigrateKeyAtRest: %v", err)
+	}
+	if again {
+		t.Fatal("second migration must be a no-op")
+	}
+}
+
+func TestMigrateAbortLeavesPlaintextIntact(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := Init(dir); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	keyPath := filepath.Join(dir, caKeyFile)
+	before, _ := os.ReadFile(keyPath)
+
+	// A sealer whose keystore is unavailable cannot be constructed; simulate a
+	// DEK-establishment failure by passing a nil sealer → MigrateKeyAtRest errors.
+	if _, err := MigrateKeyAtRest(dir, nil); err == nil {
+		t.Fatal("expected error with nil sealer")
+	}
+	after, _ := os.ReadFile(keyPath)
+	if !cryptoEqual(before, after) {
+		t.Fatal("plaintext key must be untouched on abort")
+	}
+}
+
+func cryptoEqual(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func TestLoadWithSealerRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	sealer, _ := crypto.NewSealer(crypto.Options{Mode: crypto.ModeKeystore, KeyStore: crypto.NewFakeKeyStore()})
