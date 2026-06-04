@@ -12,9 +12,11 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/inovacc/sentinel/internal/audit"
 	"github.com/inovacc/sentinel/internal/ca"
 	"github.com/inovacc/sentinel/internal/datadir"
 	"github.com/inovacc/sentinel/internal/fleet"
+	"github.com/inovacc/sentinel/internal/settings"
 	"github.com/inovacc/sentinel/pkg/transport"
 	"github.com/spf13/cobra"
 )
@@ -263,7 +265,15 @@ func runBootstrapConnect(addr, role string, force bool) error {
 		defer cleanup()
 		existing, getErr := reg.Get(result.PeerDeviceID)
 		if msg, refuse := repairGuard(existing, getErr, caFingerprint, force); refuse {
-			return fmt.Errorf("%s", msg)
+			// Record the refusal as a critical pairing.conflict before aborting.
+			// This is the connect-side mirror of the server's pairing audit: a
+			// known peer whose CA changed (rotation / MITM) was refused.
+			auditLog, aerr := connectAuditLogger()
+			if aerr != nil {
+				return fmt.Errorf("%s (additionally: could not open audit log to record the conflict: %v)", msg, aerr)
+			}
+			defer func() { _ = auditLog.Close() }()
+			return recordPairingConflict(auditLog, result.PeerDeviceID, msg)
 		}
 	}
 
@@ -319,6 +329,35 @@ func runBootstrapConnect(addr, role string, force bool) error {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(output)
+}
+
+// recordPairingConflict emits the critical pairing.conflict event for a refused
+// re-pair and returns the refusal error to the caller. It is critical and
+// fail-closed: if the conflict itself cannot be audited, the returned error says
+// so rather than letting the refusal go unrecorded. On success it returns the
+// original refusal message as the error (the conflict is still a refusal).
+func recordPairingConflict(auditLog audit.Logger, deviceID, msg string) error {
+	if rerr := auditLog.Record(context.Background(), audit.Event{
+		Type:    audit.EventPairingConflict,
+		Outcome: audit.OutcomeDeny,
+		Target:  deviceID,
+		Detail:  map[string]any{"device_id": deviceID, "reason": "ca-changed"},
+	}); rerr != nil {
+		return fmt.Errorf("%s (additionally: refusing to proceed with an unaudited conflict: %v)", msg, rerr)
+	}
+	return fmt.Errorf("%s", msg)
+}
+
+// connectAuditLogger builds the security audit logger from settings for the
+// client-side connect flow, so a pairing.conflict refusal is recorded with the
+// same store and posture the daemon uses. The caller owns Close.
+func connectAuditLogger() (audit.Logger, error) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	cfg, err := settings.Load(datadir.ConfigPath())
+	if err != nil {
+		cfg = settings.DefaultConfig()
+	}
+	return buildAuditLogger(cfg, logger)
 }
 
 // caPinFingerprint returns the fingerprint to pin for a peer's CA. An empty CA

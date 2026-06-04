@@ -66,7 +66,9 @@ func newFleetCmd() *cobra.Command {
 			Short: "Remove a device from the fleet",
 			Args:  cobra.ExactArgs(1),
 			RunE: func(cmd *cobra.Command, args []string) error {
-				reg, cleanup, err := openRegistry()
+				// fleet remove MUTATES the registry, so use the audited registry:
+				// removals are a critical event and must be recorded (fail-closed).
+				reg, cleanup, err := openRegistryAudited()
 				if err != nil {
 					return err
 				}

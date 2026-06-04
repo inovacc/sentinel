@@ -4,11 +4,13 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 
 	"github.com/inovacc/sentinel/internal/ca"
 	"github.com/inovacc/sentinel/internal/datadir"
 	"github.com/inovacc/sentinel/internal/fleet"
+	"github.com/inovacc/sentinel/internal/settings"
 	"github.com/spf13/cobra"
 
 	_ "modernc.org/sqlite"
@@ -77,6 +79,41 @@ func openRegistry() (*fleet.Registry, func(), error) {
 	}
 
 	return reg, func() { _ = db.Close() }, nil
+}
+
+// openRegistryAudited opens the fleet registry like openRegistry but wires in
+// the real security audit logger built from settings, so CLI-initiated fleet
+// mutations (e.g. 'sentinel fleet remove') are recorded with the same
+// fail-closed posture as the daemon. The returned cleanup closes the audit
+// logger and the database. Read-only commands should keep using openRegistry.
+func openRegistryAudited() (*fleet.Registry, func(), error) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	cfg, err := settings.Load(datadir.ConfigPath())
+	if err != nil {
+		cfg = settings.DefaultConfig()
+	}
+	auditLog, err := buildAuditLogger(cfg, logger)
+	if err != nil {
+		return nil, nil, fmt.Errorf("init audit logger: %w", err)
+	}
+
+	db, err := sql.Open("sqlite", datadir.DBPath())
+	if err != nil {
+		_ = auditLog.Close()
+		return nil, nil, fmt.Errorf("open database: %w", err)
+	}
+
+	reg, err := fleet.NewRegistry(db, fleet.WithAuditLogger(auditLog))
+	if err != nil {
+		_ = db.Close()
+		_ = auditLog.Close()
+		return nil, nil, fmt.Errorf("init fleet registry: %w", err)
+	}
+
+	return reg, func() {
+		_ = db.Close()
+		_ = auditLog.Close()
+	}, nil
 }
 
 func pairAccept(deviceID, role string) error {

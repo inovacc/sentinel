@@ -2,10 +2,14 @@
 package fleet
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
+
+	"github.com/inovacc/sentinel/internal/audit"
 )
 
 // DeviceStatus represents the connection state of a device.
@@ -40,18 +44,49 @@ type Device struct {
 	CACertPEM []byte `json:"-"`
 }
 
+// Option configures a Registry.
+type Option func(*Registry)
+
+// WithAuditLogger sets the security audit logger. It mirrors the worker.Pool
+// pattern: the logger is never nil (NopLogger by default), so emission sites are
+// unconditional and a missing logger silently records nothing.
+func WithAuditLogger(l audit.Logger) Option {
+	return func(r *Registry) {
+		if l != nil {
+			r.auditLog = l
+		}
+	}
+}
+
 // Registry manages the fleet of known devices.
 type Registry struct {
-	db *sql.DB
+	db       *sql.DB
+	auditLog audit.Logger
 }
 
 // NewRegistry creates a fleet registry with SQLite persistence.
-func NewRegistry(db *sql.DB) (*Registry, error) {
-	r := &Registry{db: db}
+func NewRegistry(db *sql.DB, opts ...Option) (*Registry, error) {
+	r := &Registry{db: db, auditLog: audit.NopLogger{}}
+	for _, o := range opts {
+		o(r)
+	}
+	if r.auditLog == nil {
+		r.auditLog = audit.NopLogger{}
+	}
 	if err := r.migrate(); err != nil {
 		return nil, fmt.Errorf("fleet: migrate schema: %w", err)
 	}
 	return r, nil
+}
+
+// SetAuditLogger swaps the audit logger after construction. The daemon builds
+// the Registry before the audit logger exists (see cmd/serve.go ordering), so a
+// setter is provided in addition to the functional option. A nil logger is
+// ignored to preserve the never-nil invariant.
+func (r *Registry) SetAuditLogger(l audit.Logger) {
+	if l != nil {
+		r.auditLog = l
+	}
 }
 
 func (r *Registry) migrate() error {
@@ -167,7 +202,10 @@ func (r *Registry) Reject(deviceID string) error {
 	return nil
 }
 
-// Remove removes any device from the registry.
+// Remove removes any device from the registry. Removal is a critical fleet
+// mutation: when a row is actually deleted it emits fleet.remove and fails
+// closed if that audit write fails (the catalog classifies fleet.remove as
+// Critical), so a removal can never go unrecorded.
 func (r *Registry) Remove(deviceID string) error {
 	res, err := r.db.Exec(`DELETE FROM fleet_devices WHERE device_id = ?`, deviceID)
 	if err != nil {
@@ -176,6 +214,14 @@ func (r *Registry) Remove(deviceID string) error {
 	n, _ := res.RowsAffected()
 	if n == 0 {
 		return fmt.Errorf("fleet: device %s not found", deviceID)
+	}
+	if aerr := r.auditLog.Record(context.Background(), audit.Event{
+		Type:    audit.EventFleetRemove,
+		Outcome: audit.OutcomeAllow,
+		Target:  deviceID,
+		Detail:  map[string]any{"device_id": deviceID},
+	}); aerr != nil {
+		return fmt.Errorf("fleet: refusing to remove device unaudited: %w", aerr)
 	}
 	return nil
 }
@@ -295,7 +341,43 @@ func scanDeviceRow(rows *sql.Rows) (*Device, error) {
 // SetCAPin records the pinned CA fingerprint and certificate for a peer. The
 // fingerprint pins the trust anchor agreed at pairing time so a later CA
 // rotation is detectable. Returns an error if the device is not registered.
+//
+// When this REPLACES a different, already-pinned fingerprint (a genuine CA
+// rotation) it emits the critical capin.change event and fails closed: if that
+// audit write fails the pin is NOT changed. A first-time pin (no prior
+// fingerprint) and a no-op re-pin (same fingerprint) do not emit capin.change.
 func (r *Registry) SetCAPin(deviceID, fingerprint string, caCertPEM []byte) error {
+	// Read the current pin first so a genuine rotation can be detected and
+	// audited before the row is mutated (fail-closed ordering).
+	var oldFingerprint string
+	err := r.db.QueryRow(
+		`SELECT ca_fingerprint FROM fleet_devices WHERE device_id = ?`, deviceID,
+	).Scan(&oldFingerprint)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("fleet: device %s not found", deviceID)
+		}
+		return fmt.Errorf("fleet: read existing CA pin: %w", err)
+	}
+
+	rotated := oldFingerprint != "" && oldFingerprint != fingerprint
+	if rotated {
+		// Critical event: emit BEFORE changing the pin. On audit-write failure
+		// the pin is left untouched so the rotation cannot be applied unrecorded.
+		if aerr := r.auditLog.Record(context.Background(), audit.Event{
+			Type:    audit.EventCAPinChange,
+			Outcome: audit.OutcomeAllow,
+			Target:  deviceID,
+			Detail: map[string]any{
+				"device_id":     deviceID,
+				"old_fp_prefix": fingerprintPrefix(oldFingerprint),
+				"new_fp_prefix": fingerprintPrefix(fingerprint),
+			},
+		}); aerr != nil {
+			return fmt.Errorf("fleet: refusing to change CA pin unaudited: %w", aerr)
+		}
+	}
+
 	res, err := r.db.Exec(
 		`UPDATE fleet_devices SET ca_fingerprint = ?, ca_cert_pem = ? WHERE device_id = ?`,
 		fingerprint, caCertPEM, deviceID,
@@ -308,4 +390,16 @@ func (r *Registry) SetCAPin(deviceID, fingerprint string, caCertPEM []byte) erro
 		return fmt.Errorf("fleet: device %s not found", deviceID)
 	}
 	return nil
+}
+
+// fingerprintPrefix returns a short, non-secret prefix of a CA fingerprint for
+// audit detail. Fingerprints are public certificate digests (not secrets), but
+// only a prefix is recorded to keep audit detail compact and to avoid logging
+// full identifiers as a matter of hygiene.
+func fingerprintPrefix(fp string) string {
+	const max = 19 // e.g. "sha256:" + 12 hex chars
+	if len(fp) <= max {
+		return fp
+	}
+	return fp[:max]
 }

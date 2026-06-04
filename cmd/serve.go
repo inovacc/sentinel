@@ -240,6 +240,10 @@ func buildDaemon(ctx context.Context) (*daemon, error) {
 		return d, err
 	}
 	d.auditLog = auditLog
+	// The registry is constructed before the audit logger exists (see ordering
+	// above), so inject the real logger now. From here every fleet mutation
+	// (Remove, CA-pin rotation) is recorded with the same fail-closed posture.
+	registry.SetAuditLogger(auditLog)
 	d.addCleanup(func() { _ = auditLog.Close() })          // runs last (LIFO)
 	d.addCleanup(func() {                                   // runs before Close
 		_ = auditLog.Record(context.Background(), audit.Event{
