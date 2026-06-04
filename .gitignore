@@ -44,3 +44,12 @@ build/
 
 # Sentinel data (runtime)
 .sentinel/
+
+# External code-auditor output (tool-generated; regenerated, not source of truth).
+# Curated docs (e.g. docs/quality/MATURITY-*.md) stay tracked.
+docs/quality/*.json
+docs/quality/bad-practices.md
+docs/quality/cognitive.md
+docs/quality/modernization.md
+docs/quality/vulnerabilities.md
+docs/quality/AI-FIX-INSTRUCTIONS.md
