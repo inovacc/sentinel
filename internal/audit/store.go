@@ -256,8 +256,6 @@ func (l *SQLiteLogger) Close() error {
 // re-importing os in test files that build on only one platform.
 func statFile(path string) (os.FileInfo, error) { return os.Stat(path) }
 
-// --- temporary stubs, replaced in Task 5 (redact) and Task 6 (segment) ---
-
-func redactDetail(d map[string]any) map[string]any { return d }
+// --- temporary stubs, replaced in Task 6 (segment) ---
 
 func (l *SQLiteLogger) sealSegment(_ int64, _ string) error { return nil }
