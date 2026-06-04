@@ -2,9 +2,9 @@ package settings
 
 import "testing"
 
-func TestCurrentConfigVersionIsThree(t *testing.T) {
-	if CurrentConfigVersion != 3 {
-		t.Fatalf("CurrentConfigVersion = %d, want 3", CurrentConfigVersion)
+func TestCurrentConfigVersionIsFour(t *testing.T) {
+	if CurrentConfigVersion != 4 {
+		t.Fatalf("CurrentConfigVersion = %d, want 4", CurrentConfigVersion)
 	}
 }
 
@@ -34,14 +34,15 @@ func TestValidateRejectsBadAudit(t *testing.T) {
 	}
 }
 
-func TestMigrateV2ToV3BumpsVersion(t *testing.T) {
+func TestMigrateV2ToCurrentBumpsVersion(t *testing.T) {
 	c := DefaultConfig()
 	c.Version = 2
+	c.Limits = LimitsConfig{} // simulate old file with no limits block
 	changed := c.Migrate(2)
 	if !changed {
 		t.Error("Migrate(2) should report a change")
 	}
-	if c.Version != 3 {
-		t.Errorf("post-migrate version = %d, want 3", c.Version)
+	if c.Version != CurrentConfigVersion {
+		t.Errorf("post-migrate version = %d, want %d", c.Version, CurrentConfigVersion)
 	}
 }

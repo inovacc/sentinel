@@ -4,13 +4,14 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
 
 // CurrentConfigVersion is the schema version written by this build. Bump it
 // whenever the config layout changes and add a step to Config.Migrate.
-const CurrentConfigVersion = 3
+const CurrentConfigVersion = 4
 
 // Config holds all sentinel configuration.
 type Config struct {
@@ -26,6 +27,7 @@ type Config struct {
 	Discovery DiscoveryConfig `yaml:"discovery"`
 	Confine   ConfineConfig   `yaml:"confine"`
 	Audit     AuditConfig     `yaml:"audit"`
+	Limits    LimitsConfig    `yaml:"limits"`
 }
 
 type DeviceConfig struct {
@@ -114,6 +116,47 @@ type AuditConfig struct {
 	SegmentMax    int    `yaml:"segment_max"`    // records per segment before seal
 }
 
+// LimitsConfig holds the resource-limit / DoS-protection knobs (Phase 3.2).
+// Enabled (default true) gates the whole subsystem; the Proc* caps may be 0,
+// meaning "unlimited — leave it to the OS default".
+type LimitsConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// T1.3 — bootstrap (pre-auth, per source IP).
+	BootstrapPerIPMaxConns int `yaml:"bootstrap_per_ip_max_conns"`
+	BootstrapPerIPRate     int `yaml:"bootstrap_per_ip_rate"`
+	// T2.6 — mTLS listener.
+	TLSHandshakeTimeout time.Duration `yaml:"tls_handshake_timeout"`
+	MaxConns            int           `yaml:"max_conns"`
+	PerDeviceMaxConns   int           `yaml:"per_device_max_conns"`
+	// T2.4 — gRPC.
+	MaxRecvMsgBytes      int    `yaml:"max_recv_msg_bytes"`
+	MaxConcurrentStreams uint32 `yaml:"max_concurrent_streams"`
+	RPCRatePerSec        int    `yaml:"rpc_rate_per_sec"`
+	// T5.3 — process rlimits (Unix; complements the Windows Job Object).
+	ProcMaxMemoryBytes uint64 `yaml:"proc_max_memory_bytes"` // RLIMIT_AS; 0 = unlimited
+	ProcMaxOpenFiles   uint64 `yaml:"proc_max_open_files"`   // RLIMIT_NOFILE; 0 = unlimited
+	ProcMaxCPUSeconds  uint64 `yaml:"proc_max_cpu_seconds"`  // RLIMIT_CPU; 0 = unlimited
+}
+
+// defaultLimitsConfig is the single source of truth shared by DefaultConfig and
+// Migrate so the two cannot drift.
+func defaultLimitsConfig() LimitsConfig {
+	return LimitsConfig{
+		Enabled:                true,
+		BootstrapPerIPMaxConns: 8,
+		BootstrapPerIPRate:     5,
+		TLSHandshakeTimeout:    10 * time.Second,
+		MaxConns:               256,
+		PerDeviceMaxConns:      16,
+		MaxRecvMsgBytes:        1 << 20, // 1 MiB
+		MaxConcurrentStreams:   128,
+		RPCRatePerSec:          100,
+		ProcMaxMemoryBytes:     1 << 30, // 1 GiB
+		ProcMaxOpenFiles:       1024,
+		ProcMaxCPUSeconds:      0,
+	}
+}
+
 // defaultAuditConfig is the single source of truth for audit defaults, shared by
 // DefaultConfig so the two cannot drift.
 func defaultAuditConfig() AuditConfig {
@@ -185,6 +228,7 @@ func DefaultConfig() *Config {
 		},
 		Confine: defaultConfineConfig(),
 		Audit:   defaultAuditConfig(),
+		Limits:  defaultLimitsConfig(),
 	}
 }
 
@@ -220,6 +264,34 @@ func (c *Config) Validate() error {
 	}
 	if c.Audit.SegmentMax < 1 {
 		return fmt.Errorf("audit.segment_max must be >= 1, got %d", c.Audit.SegmentMax)
+	}
+	// Check resource limits when the subsystem is enabled. The Proc* caps may be
+	// 0 (meaning "unlimited"), so they are intentionally not checked here.
+	if c.Limits.Enabled {
+		if c.Limits.BootstrapPerIPMaxConns <= 0 {
+			return fmt.Errorf("limits.bootstrap_per_ip_max_conns must be > 0, got %d", c.Limits.BootstrapPerIPMaxConns)
+		}
+		if c.Limits.BootstrapPerIPRate <= 0 {
+			return fmt.Errorf("limits.bootstrap_per_ip_rate must be > 0, got %d", c.Limits.BootstrapPerIPRate)
+		}
+		if c.Limits.TLSHandshakeTimeout <= 0 {
+			return fmt.Errorf("limits.tls_handshake_timeout must be > 0, got %v", c.Limits.TLSHandshakeTimeout)
+		}
+		if c.Limits.MaxConns <= 0 {
+			return fmt.Errorf("limits.max_conns must be > 0, got %d", c.Limits.MaxConns)
+		}
+		if c.Limits.PerDeviceMaxConns <= 0 {
+			return fmt.Errorf("limits.per_device_max_conns must be > 0, got %d", c.Limits.PerDeviceMaxConns)
+		}
+		if c.Limits.MaxRecvMsgBytes <= 0 {
+			return fmt.Errorf("limits.max_recv_msg_bytes must be > 0, got %d", c.Limits.MaxRecvMsgBytes)
+		}
+		if c.Limits.MaxConcurrentStreams == 0 {
+			return fmt.Errorf("limits.max_concurrent_streams must be > 0")
+		}
+		if c.Limits.RPCRatePerSec <= 0 {
+			return fmt.Errorf("limits.rpc_rate_per_sec must be > 0, got %d", c.Limits.RPCRatePerSec)
+		}
 	}
 	return nil
 }
@@ -289,9 +361,15 @@ func OnDiskVersion(path string) (int, error) {
 // guarded by the on-disk fromVersion that introduced the change.
 func (c *Config) Migrate(fromVersion int) bool {
 	changed := false
-	// (No confine back-fill is needed: Load supplies the v2 defaults for files
-	// that predate the confine: block. fromVersion is retained for the future
-	// field-level migrations described above. See the doc comment.)
+	// v3 → v4 introduced the limits: block. Load overlays on-disk YAML onto
+	// DefaultConfig, so a file written at v3 already carries the defaults for any
+	// key it omits — but a file that wrote an explicit (zero-value) limits block,
+	// or one with Enabled=false-by-omission, must be back-filled to the safe
+	// defaults. Detect the unmigrated zero block and restore defaults.
+	if fromVersion < 4 && c.Limits == (LimitsConfig{}) {
+		c.Limits = defaultLimitsConfig()
+		changed = true
+	}
 	if c.Version < CurrentConfigVersion {
 		c.Version = CurrentConfigVersion
 		changed = true
