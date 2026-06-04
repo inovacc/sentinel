@@ -51,6 +51,20 @@ func NewBootstrapServer(m *Manager, version string) *BootstrapServer {
 	}
 }
 
+// StartSweeper launches the per-IP limiter's idle-bucket sweep until ctx is
+// done. It is a no-op when limiting is disabled.
+func (bs *BootstrapServer) StartSweeper(ctx context.Context) {
+	if bs.limiter == nil {
+		return
+	}
+	stop := make(chan struct{})
+	go func() {
+		<-ctx.Done()
+		close(stop)
+	}()
+	go bs.limiter.runSweeper(time.Minute, 5*time.Minute, stop)
+}
+
 // Serve accepts and handles bootstrap connections until the context is cancelled
 // or the listener is closed.
 func (bs *BootstrapServer) Serve(ctx context.Context) error {

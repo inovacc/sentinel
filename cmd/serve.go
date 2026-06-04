@@ -30,6 +30,7 @@ import (
 	"github.com/inovacc/sentinel/internal/fleet"
 	"github.com/inovacc/sentinel/internal/fs"
 	sentinelgrpc "github.com/inovacc/sentinel/internal/grpc"
+	"github.com/inovacc/sentinel/internal/limits"
 	"github.com/inovacc/sentinel/internal/logrotate"
 	"github.com/inovacc/sentinel/internal/metrics"
 	"github.com/inovacc/sentinel/internal/payload"
@@ -111,13 +112,14 @@ func runDaemonCtx(ctx context.Context) error {
 // daemon holds the wired components of a running sentinel daemon. It is
 // assembled by buildDaemon and driven by serve.
 type daemon struct {
-	logger       *slog.Logger
-	registry     *fleet.Registry
-	sessionMgr   *session.Manager
-	workerPool   *worker.Pool
-	transportMgr *transport.Manager
-	grpcServer   *sentinelgrpc.Server
-	auditLog     audit.Logger
+	logger        *slog.Logger
+	registry      *fleet.Registry
+	sessionMgr    *session.Manager
+	workerPool    *worker.Pool
+	transportMgr  *transport.Manager
+	grpcServer    *sentinelgrpc.Server
+	auditLog      audit.Logger
+	limitRecorder *limits.Recorder
 
 	certDir       string
 	deviceID      string
@@ -167,10 +169,13 @@ func buildDaemon(ctx context.Context) (*daemon, error) {
 	// no-op+warn elsewhere) and tear it down on shutdown — closing it kills any
 	// processes still held in its job object.
 	confiner, err := confine.New(confine.Config{
-		Enabled:      cfg.Confine.Enabled,
-		MaxMemoryMB:  cfg.Confine.MaxMemoryMB,
-		CPUPercent:   cfg.Confine.CPUPercent,
-		MaxProcesses: cfg.Confine.MaxProcesses,
+		Enabled:            cfg.Confine.Enabled,
+		MaxMemoryMB:        cfg.Confine.MaxMemoryMB,
+		CPUPercent:         cfg.Confine.CPUPercent,
+		MaxProcesses:       cfg.Confine.MaxProcesses,
+		ProcMaxMemoryBytes: cfg.Limits.ProcMaxMemoryBytes,
+		ProcMaxOpenFiles:   cfg.Limits.ProcMaxOpenFiles,
+		ProcMaxCPUSeconds:  cfg.Limits.ProcMaxCPUSeconds,
 	}, logger)
 	if err != nil {
 		return d, fmt.Errorf("init confiner: %w", err)
@@ -240,6 +245,7 @@ func buildDaemon(ctx context.Context) (*daemon, error) {
 		return d, err
 	}
 	d.auditLog = auditLog
+	d.limitRecorder = limits.NewRecorder(auditLog)
 	// The registry is constructed before the audit logger exists (see ordering
 	// above), so inject the real logger now. From here every fleet mutation
 	// (Remove, CA-pin rotation) is recorded with the same fail-closed posture.
@@ -262,15 +268,17 @@ func buildDaemon(ctx context.Context) (*daemon, error) {
 	}
 	d.addCleanup(func() { d.workerPool.Stop() })
 
-	d.transportMgr, err = buildTransport(cfg, authority, certPEM, keyPEM, certDir, d.bootstrapAddr, d.grpcAddr, registry, auditLog, logger)
+	d.transportMgr, err = buildTransport(cfg, authority, certPEM, keyPEM, certDir, d.bootstrapAddr, d.grpcAddr, registry, auditLog, d.limitRecorder, logger)
 	if err != nil {
 		return d, err
 	}
 
-	rl := sentinelgrpc.NewRateLimiter(100, time.Second)
+	rl := sentinelgrpc.NewRateLimiter(cfg.Limits.RPCRatePerSec, time.Second)
 	policy := rbac.NewPolicy()
 	d.grpcServer, err = sentinelgrpc.NewServer(certPEM, keyPEM, authority.RootCertPEM(), policy, auditLog,
 		sentinelgrpc.WithRateLimiter(rl),
+		sentinelgrpc.WithMaxRecvMsgSize(cfg.Limits.MaxRecvMsgBytes),
+		sentinelgrpc.WithMaxConcurrentStreams(cfg.Limits.MaxConcurrentStreams),
 	)
 	if err != nil {
 		return d, fmt.Errorf("init gRPC server: %w", err)
@@ -339,7 +347,7 @@ func openDataStores(db *sql.DB, cfg *settings.Config, logger *slog.Logger) (*fle
 
 // buildTransport creates the bootstrap identity and the two-phase transport
 // manager. Listeners are not bound until serve runs.
-func buildTransport(cfg *settings.Config, authority *ca.CA, certPEM, keyPEM []byte, certDir, bootstrapAddr, grpcAddr string, registry *fleet.Registry, auditLog audit.Logger, logger *slog.Logger) (*transport.Manager, error) {
+func buildTransport(cfg *settings.Config, authority *ca.CA, certPEM, keyPEM []byte, certDir, bootstrapAddr, grpcAddr string, registry *fleet.Registry, auditLog audit.Logger, limitRec *limits.Recorder, logger *slog.Logger) (*transport.Manager, error) {
 	certStore, err := transport.NewCertStore(certDir)
 	if err != nil {
 		return nil, fmt.Errorf("cert store: %w", err)
@@ -357,9 +365,11 @@ func buildTransport(cfg *settings.Config, authority *ca.CA, certPEM, keyPEM []by
 		DeviceKeyPEM:     keyPEM,
 		BootstrapCertPEM: bootCert,
 		BootstrapKeyPEM:  bootKey,
-		BootstrapTimeout: 0, // No timeout — keep bootstrap open for pairing.
+		BootstrapTimeout: 0,
 		Logger:           logger,
 		OnPeerAccepted:   buildOnPeerAccepted(logger, registry, auditLog, cfg.Security.AutoAccept),
+		Limits:           cfg.Limits,
+		LimitRecorder:    limitRec,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("init transport: %w", err)
@@ -602,6 +612,7 @@ func (d *daemon) startPairing(ctx context.Context) {
 			logger.Error("bootstrap server stopped", "error", err)
 		}
 	}()
+	bs.StartSweeper(ctx)
 	logger.Info("bootstrap server started for pairing", "addr", d.bootstrapAddr)
 
 	if !d.discoveryEnabled {

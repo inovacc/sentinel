@@ -100,8 +100,6 @@ func (l *perIPLimiter) bucketCount() int {
 }
 
 // runSweeper sweeps idle buckets every interval until stop is closed.
-//
-//nolint:unused // wired in a later task (serve command background goroutine).
 func (l *perIPLimiter) runSweeper(interval, idle time.Duration, stop <-chan struct{}) {
 	t := time.NewTicker(interval)
 	defer t.Stop()
