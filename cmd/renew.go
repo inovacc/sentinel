@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"time"
 
+	"github.com/inovacc/sentinel/internal/audit"
 	"github.com/inovacc/sentinel/internal/ca"
 	"github.com/inovacc/sentinel/internal/datadir"
 	"github.com/inovacc/sentinel/internal/settings"
@@ -23,6 +24,24 @@ func portOnly(addr string) string {
 		return port
 	}
 	return "7399"
+}
+
+// buildRenewOnPeerAccepted returns an OnPeerAccepted callback for the renew
+// path that emits a critical cert.renew event for each re-paired peer,
+// failing closed if the audit write fails.
+func buildRenewOnPeerAccepted(logger *slog.Logger, auditLog audit.Logger) func(string, []byte, string) (bool, error) {
+	return func(peerID string, peerCert []byte, role string) (bool, error) {
+		logger.Info("renew: re-pairing peer", "peer_device_id", peerID, "role", role)
+		if aerr := auditLog.Record(context.Background(), audit.Event{
+			Type:    audit.EventCertRenew,
+			Outcome: audit.OutcomeAllow,
+			Target:  peerID,
+			Detail:  map[string]any{"device_id": peerID, "role": role},
+		}); aerr != nil {
+			return false, fmt.Errorf("renew: refusing to complete unaudited cert renewal: %w", aerr)
+		}
+		return true, nil
+	}
 }
 
 func newRenewCmd() *cobra.Command {
@@ -87,7 +106,15 @@ func runRenew(window time.Duration) error {
 	}
 	bootstrapAddr := orDefault(cfg.Listen.Bootstrap, ":7399")
 
-	reg, cleanup, err := openRegistry()
+	auditLog, aerr := buildAuditLogger(cfg, logger)
+	if aerr != nil {
+		return aerr
+	}
+	defer func() { _ = auditLog.Close() }()
+	_ = auditLog.Record(context.Background(), audit.Event{
+		Type: audit.EventDaemonRenew, Outcome: audit.OutcomeAllow, Target: "self"})
+
+	_, cleanup, err := openRegistry()
 	if err != nil {
 		return fmt.Errorf("open registry: %w", err)
 	}
@@ -103,7 +130,7 @@ func runRenew(window time.Duration) error {
 		BootstrapKeyPEM:  bootKey,
 		BootstrapTimeout: window,
 		Logger:           logger,
-		OnPeerAccepted:   buildOnPeerAccepted(logger, reg, cfg.Security.AutoAccept),
+		OnPeerAccepted:   buildRenewOnPeerAccepted(logger, auditLog),
 	})
 	if err != nil {
 		return fmt.Errorf("init transport: %w", err)

@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/inovacc/sentinel/internal/audit"
 	"github.com/inovacc/sentinel/internal/confine"
 	"github.com/inovacc/sentinel/internal/sandbox"
 )
@@ -19,21 +20,25 @@ import (
 type Runner struct {
 	sandbox  *sandbox.Sandbox
 	confiner confine.Confiner
+	auditLog audit.Logger
 	logger   *slog.Logger
 	warnOnce sync.Once // guards the one-time "running unconfined" warning
 }
 
 // NewRunner creates a command runner with sandbox enforcement.
 func NewRunner(sb *sandbox.Sandbox) *Runner {
-	return &Runner{sandbox: sb}
+	return &Runner{sandbox: sb, auditLog: audit.NopLogger{}}
 }
 
-// NewRunnerWithConfiner injects a confiner and logger (used by the daemon).
-func NewRunnerWithConfiner(sb *sandbox.Sandbox, c confine.Confiner, logger *slog.Logger) *Runner {
+// NewRunnerWithConfiner injects a confiner, audit logger, and slog logger.
+func NewRunnerWithConfiner(sb *sandbox.Sandbox, c confine.Confiner, al audit.Logger, logger *slog.Logger) *Runner {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Runner{sandbox: sb, confiner: c, logger: logger}
+	if al == nil {
+		al = audit.NopLogger{}
+	}
+	return &Runner{sandbox: sb, confiner: c, auditLog: al, logger: logger}
 }
 
 // applyConfine applies the confiner to a started process, returning an error
@@ -58,6 +63,16 @@ func (r *Runner) applyConfine(p *os.Process) error {
 		// The caller returns immediately on error and never calls Wait, so
 		// confinement enforcement owns cleanup of the process it refused.
 		_, _ = p.Wait()
+		if r.auditLog != nil {
+			if aerr := r.auditLog.Record(context.Background(), audit.Event{
+				Type:    audit.EventConfineRefuse,
+				Outcome: audit.OutcomeDeny,
+				Target:  "exec",
+				Detail:  map[string]any{"reason": "unconfined process refused"},
+			}); aerr != nil {
+				return fmt.Errorf("exec: refusing unconfined process (audit failed: %v): %w", aerr, err)
+			}
+		}
 		return fmt.Errorf("exec: refusing unconfined process: %w", err)
 	}
 	return nil
@@ -115,6 +130,12 @@ func (r *Runner) Run(ctx context.Context, req *RunRequest) (*RunResult, error) {
 	if err := r.applyConfine(cmd.Process); err != nil {
 		return nil, err
 	}
+	_ = r.auditLog.Record(ctx, audit.Event{
+		Type:    audit.EventExecRun,
+		Outcome: audit.OutcomeAllow,
+		Target:  req.Command,
+		Detail:  map[string]any{"command": req.Command, "argv": req.Args, "cwd": cmd.Dir},
+	})
 	runErr := cmd.Wait()
 	duration := time.Since(start).Milliseconds()
 

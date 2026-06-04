@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/inovacc/sentinel/internal/audit"
 	"github.com/inovacc/sentinel/internal/ca"
 	"github.com/inovacc/sentinel/internal/confine"
 	"github.com/inovacc/sentinel/internal/datadir"
@@ -116,6 +117,7 @@ type daemon struct {
 	workerPool   *worker.Pool
 	transportMgr *transport.Manager
 	grpcServer   *sentinelgrpc.Server
+	auditLog     audit.Logger
 
 	certDir       string
 	deviceID      string
@@ -233,26 +235,43 @@ func buildDaemon(ctx context.Context) (*daemon, error) {
 		logger.Info("recovered interrupted sessions", "count", recovered)
 	}
 
-	d.workerPool, err = worker.NewPool(db, sb, worker.WithLogger(logger), worker.WithConfiner(confiner))
+	auditLog, err := buildAuditLogger(cfg, logger)
+	if err != nil {
+		return d, err
+	}
+	d.auditLog = auditLog
+	d.addCleanup(func() { _ = auditLog.Close() })          // runs last (LIFO)
+	d.addCleanup(func() {                                   // runs before Close
+		_ = auditLog.Record(context.Background(), audit.Event{
+			Type: audit.EventDaemonStop, Outcome: audit.OutcomeAllow, Target: d.deviceID})
+	})
+	_ = auditLog.Record(context.Background(), audit.Event{
+		Type:    audit.EventDaemonStart,
+		Outcome: audit.OutcomeAllow,
+		Target:  d.deviceID,
+		Detail:  map[string]any{"device_id": d.deviceID},
+	})
+
+	d.workerPool, err = worker.NewPool(db, sb, worker.WithLogger(logger), worker.WithConfiner(confiner), worker.WithAuditLogger(auditLog))
 	if err != nil {
 		return d, fmt.Errorf("init worker pool: %w", err)
 	}
 	d.addCleanup(func() { d.workerPool.Stop() })
 
-	d.transportMgr, err = buildTransport(cfg, authority, certPEM, keyPEM, certDir, d.bootstrapAddr, d.grpcAddr, registry, logger)
+	d.transportMgr, err = buildTransport(cfg, authority, certPEM, keyPEM, certDir, d.bootstrapAddr, d.grpcAddr, registry, auditLog, logger)
 	if err != nil {
 		return d, err
 	}
 
 	rl := sentinelgrpc.NewRateLimiter(100, time.Second)
 	policy := rbac.NewPolicy()
-	d.grpcServer, err = sentinelgrpc.NewServer(certPEM, keyPEM, authority.RootCertPEM(), policy,
+	d.grpcServer, err = sentinelgrpc.NewServer(certPEM, keyPEM, authority.RootCertPEM(), policy, auditLog,
 		sentinelgrpc.WithRateLimiter(rl),
 	)
 	if err != nil {
 		return d, fmt.Errorf("init gRPC server: %w", err)
 	}
-	registerServices(d.grpcServer, sb, sessionMgr, d.workerPool, confiner, logger)
+	registerServices(d.grpcServer, sb, sessionMgr, d.workerPool, confiner, auditLog, logger)
 
 	return d, nil
 }
@@ -316,7 +335,7 @@ func openDataStores(db *sql.DB, cfg *settings.Config, logger *slog.Logger) (*fle
 
 // buildTransport creates the bootstrap identity and the two-phase transport
 // manager. Listeners are not bound until serve runs.
-func buildTransport(cfg *settings.Config, authority *ca.CA, certPEM, keyPEM []byte, certDir, bootstrapAddr, grpcAddr string, registry *fleet.Registry, logger *slog.Logger) (*transport.Manager, error) {
+func buildTransport(cfg *settings.Config, authority *ca.CA, certPEM, keyPEM []byte, certDir, bootstrapAddr, grpcAddr string, registry *fleet.Registry, auditLog audit.Logger, logger *slog.Logger) (*transport.Manager, error) {
 	certStore, err := transport.NewCertStore(certDir)
 	if err != nil {
 		return nil, fmt.Errorf("cert store: %w", err)
@@ -336,7 +355,7 @@ func buildTransport(cfg *settings.Config, authority *ca.CA, certPEM, keyPEM []by
 		BootstrapKeyPEM:  bootKey,
 		BootstrapTimeout: 0, // No timeout — keep bootstrap open for pairing.
 		Logger:           logger,
-		OnPeerAccepted:   buildOnPeerAccepted(logger, registry, cfg.Security.AutoAccept),
+		OnPeerAccepted:   buildOnPeerAccepted(logger, registry, auditLog, cfg.Security.AutoAccept),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("init transport: %w", err)
@@ -468,18 +487,37 @@ func loadOrCreateBootstrapIdentity(certStore *transport.CertStore) (certPEM, key
 
 // buildOnPeerAccepted returns the bootstrap peer-acceptance callback. When
 // auto-accept is disabled, the peer is recorded as pending for manual approval.
-func buildOnPeerAccepted(logger *slog.Logger, registry *fleet.Registry, autoAccept bool) func(string, []byte, string) (bool, error) {
+func buildOnPeerAccepted(logger *slog.Logger, registry *fleet.Registry, auditLog audit.Logger, autoAccept bool) func(string, []byte, string) (bool, error) {
 	return func(peerID string, peerCert []byte, role string) (bool, error) {
 		logger.Info("pairing request received", "peer_device_id", peerID, "requested_role", role)
 
 		if autoAccept {
 			logger.Info("auto-accepting peer", "device_id", peerID)
+			// Emit critical pairing accept events; fail closed on audit write failure.
+			for _, ev := range []audit.Event{
+				{Type: audit.EventPairingAccept, Outcome: audit.OutcomeAllow, Target: peerID, Detail: map[string]any{"device_id": peerID}},
+				{Type: audit.EventFleetAdd, Outcome: audit.OutcomeAllow, Target: peerID},
+				{Type: audit.EventCertSign, Outcome: audit.OutcomeAllow, Target: peerID, Detail: map[string]any{"role": role}},
+			} {
+				if aerr := auditLog.Record(context.Background(), ev); aerr != nil {
+					return false, fmt.Errorf("pairing: refusing to complete unaudited: %w", aerr)
+				}
+			}
 			return true, nil
 		}
 
 		// Already approved on an earlier attempt — issue the certificate now.
 		if registry.IsTrusted(peerID) {
 			logger.Info("peer already approved, signing certificate", "device_id", peerID)
+			// Emit critical pairing accept + cert sign events; fail closed on audit write failure.
+			for _, ev := range []audit.Event{
+				{Type: audit.EventPairingAccept, Outcome: audit.OutcomeAllow, Target: peerID, Detail: map[string]any{"device_id": peerID}},
+				{Type: audit.EventCertSign, Outcome: audit.OutcomeAllow, Target: peerID, Detail: map[string]any{"role": role}},
+			} {
+				if aerr := auditLog.Record(context.Background(), ev); aerr != nil {
+					return false, fmt.Errorf("pairing: refusing to complete unaudited: %w", aerr)
+				}
+			}
 			return true, nil
 		}
 
@@ -495,6 +533,15 @@ func buildOnPeerAccepted(logger *slog.Logger, registry *fleet.Registry, autoAcce
 			}
 		}
 		logger.Info("peer pending manual approval", "device_id", peerID)
+		// Emit critical pairing.reject (outcome deny); fail closed on audit write failure.
+		if aerr := auditLog.Record(context.Background(), audit.Event{
+			Type:    audit.EventPairingReject,
+			Outcome: audit.OutcomeDeny,
+			Target:  peerID,
+			Detail:  map[string]any{"device_id": peerID, "reason": "pending manual approval"},
+		}); aerr != nil {
+			return false, fmt.Errorf("pairing: refusing to complete unaudited: %w", aerr)
+		}
 		return false, fmt.Errorf("pending manual approval — run 'sentinel pair accept %s' on the server, then reconnect", peerID)
 	}
 }
@@ -591,13 +638,13 @@ func startDiscoveryBeacon(logger *slog.Logger, deviceID, bootstrapAddr string, w
 }
 
 // registerServices registers every gRPC service on the server.
-func registerServices(grpcServer *sentinelgrpc.Server, sb *sandbox.Sandbox, sessionMgr *session.Manager, pool *worker.Pool, confiner confine.Confiner, logger *slog.Logger) {
-	runner := exec.NewRunnerWithConfiner(sb, confiner, logger)
+func registerServices(grpcServer *sentinelgrpc.Server, sb *sandbox.Sandbox, sessionMgr *session.Manager, pool *worker.Pool, confiner confine.Confiner, auditLog audit.Logger, logger *slog.Logger) {
+	runner := exec.NewRunnerWithConfiner(sb, confiner, auditLog, logger)
 	fsSvc := fs.NewService(sb)
 	payloadRegistry := payload.NewRegistry()
 
 	grpcServer.RegisterExecService(sentinelgrpc.NewExecService(runner, sessionMgr, logger))
-	grpcServer.RegisterFileSystemService(sentinelgrpc.NewFileSystemService(fsSvc, sessionMgr))
+	grpcServer.RegisterFileSystemService(sentinelgrpc.NewFileSystemService(fsSvc, sessionMgr, auditLog))
 	grpcServer.RegisterSessionService(sentinelgrpc.NewSessionService(sessionMgr))
 	grpcServer.RegisterPayloadService(sentinelgrpc.NewPayloadService(payloadRegistry))
 	grpcServer.RegisterWorkerService(sentinelgrpc.NewWorkerService(pool))
@@ -729,4 +776,26 @@ func parseLogLevel(level string) slog.Level {
 	default:
 		return slog.LevelInfo
 	}
+}
+
+// buildAuditLogger constructs the security audit logger from config. A disabled
+// audit config yields a NopLogger so the rest of the wiring is unconditional.
+func buildAuditLogger(cfg *settings.Config, logger *slog.Logger) (audit.Logger, error) {
+	if !cfg.Audit.Enabled {
+		return audit.NopLogger{}, nil
+	}
+	dbPath := cfg.Audit.DBPath
+	if dbPath == "" {
+		dbPath = datadir.AuditDBPath()
+	}
+	l, err := audit.Open(audit.Options{
+		DBPath:        dbPath,
+		SegmentMax:    cfg.Audit.SegmentMax,
+		RetentionDays: cfg.Audit.RetentionDays,
+		Logger:        logger,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("init audit logger: %w", err)
+	}
+	return l, nil
 }

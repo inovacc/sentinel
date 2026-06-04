@@ -3,9 +3,11 @@ package grpc
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 
 	v1 "github.com/inovacc/sentinel/internal/api/v1"
+	"github.com/inovacc/sentinel/internal/audit"
 	"github.com/inovacc/sentinel/internal/fs"
 	"github.com/inovacc/sentinel/internal/session"
 	"google.golang.org/grpc"
@@ -20,23 +22,54 @@ type FileSystemServiceImpl struct {
 	v1.UnimplementedFileSystemServiceServer
 	fs         *fs.Service
 	sessionMgr *session.Manager // optional, for auto-checkpoint on write
+	auditLog   audit.Logger
 }
 
 // NewFileSystemService creates a new FileSystemServiceImpl.
-func NewFileSystemService(fsSvc *fs.Service, sessionMgr *session.Manager) *FileSystemServiceImpl {
-	return &FileSystemServiceImpl{fs: fsSvc, sessionMgr: sessionMgr}
+func NewFileSystemService(fsSvc *fs.Service, sessionMgr *session.Manager, auditLog ...audit.Logger) *FileSystemServiceImpl {
+	var al audit.Logger = audit.NopLogger{}
+	if len(auditLog) > 0 && auditLog[0] != nil {
+		al = auditLog[0]
+	}
+	return &FileSystemServiceImpl{fs: fsSvc, sessionMgr: sessionMgr, auditLog: al}
+}
+
+// emitSandboxDeny records a critical sandbox.deny event and returns an error
+// when the audit write itself fails (fail-closed).
+func emitSandboxDeny(ctx context.Context, al audit.Logger, target, reason string) error {
+	if al == nil {
+		return nil
+	}
+	if err := al.Record(ctx, audit.Event{
+		Type:    audit.EventSandboxDeny,
+		Outcome: audit.OutcomeDeny,
+		Target:  target,
+		Detail:  map[string]any{"reason": reason, "path": target},
+	}); err != nil {
+		return fmt.Errorf("audit: sandbox deny unrecorded: %w", err)
+	}
+	return nil
 }
 
 // ReadFile reads a file within sandbox-allowed paths.
-func (s *FileSystemServiceImpl) ReadFile(_ context.Context, req *v1.ReadFileRequest) (*v1.ReadFileResponse, error) {
+func (s *FileSystemServiceImpl) ReadFile(ctx context.Context, req *v1.ReadFileRequest) (*v1.ReadFileResponse, error) {
 	if req.GetPath() == "" {
 		return nil, status.Error(codes.InvalidArgument, "path is required")
 	}
 
 	content, size, mimeType, err := s.fs.ReadFile(req.GetPath(), req.GetOffset(), req.GetLimit())
 	if err != nil {
+		_ = emitSandboxDeny(ctx, s.auditLog, req.GetPath(), err.Error())
 		return nil, status.Errorf(codes.Internal, "read file: %v", err)
 	}
+
+	// Routine fs.read — log-and-continue on audit failure.
+	_ = s.auditLog.Record(ctx, audit.Event{
+		Type:    audit.EventFSRead,
+		Outcome: audit.OutcomeAllow,
+		Target:  req.GetPath(),
+		Detail:  map[string]any{"path": req.GetPath(), "size": size},
+	})
 
 	return &v1.ReadFileResponse{
 		Content:  content,

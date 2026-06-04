@@ -75,7 +75,7 @@ func okHandler(_ context.Context, _ any) (any, error) {
 
 func TestUnaryRBACInterceptor_AdminCanAccessAdminMethods(t *testing.T) {
 	policy := rbac.NewPolicy()
-	interceptor := unaryRBACInterceptor(policy)
+	interceptor := unaryRBACInterceptor(policy, nil)
 	cert := signDeviceCert(t, "admin")
 	ctx := peerCtx(t, cert)
 
@@ -101,7 +101,7 @@ func TestUnaryRBACInterceptor_AdminCanAccessAdminMethods(t *testing.T) {
 
 func TestUnaryRBACInterceptor_ReaderDeniedOperatorMethods(t *testing.T) {
 	policy := rbac.NewPolicy()
-	interceptor := unaryRBACInterceptor(policy)
+	interceptor := unaryRBACInterceptor(policy, nil)
 	cert := signDeviceCert(t, "reader")
 	ctx := peerCtx(t, cert)
 
@@ -131,7 +131,7 @@ func TestUnaryRBACInterceptor_ReaderDeniedOperatorMethods(t *testing.T) {
 
 func TestUnaryRBACInterceptor_NoCertRejected(t *testing.T) {
 	policy := rbac.NewPolicy()
-	interceptor := unaryRBACInterceptor(policy)
+	interceptor := unaryRBACInterceptor(policy, nil)
 	ctx := peerCtxNoCert(t)
 
 	info := &grpc.UnaryServerInfo{FullMethod: "/sentinel.v1.FleetService/Health"}
@@ -150,7 +150,7 @@ func TestUnaryRBACInterceptor_NoCertRejected(t *testing.T) {
 
 func TestUnaryRBACInterceptor_NoPeerRejected(t *testing.T) {
 	policy := rbac.NewPolicy()
-	interceptor := unaryRBACInterceptor(policy)
+	interceptor := unaryRBACInterceptor(policy, nil)
 	ctx := context.Background() // no peer info
 
 	info := &grpc.UnaryServerInfo{FullMethod: "/sentinel.v1.FleetService/Health"}
@@ -169,7 +169,7 @@ func TestUnaryRBACInterceptor_NoPeerRejected(t *testing.T) {
 
 func TestUnaryRBACInterceptor_CertMissingRoleExtension(t *testing.T) {
 	policy := rbac.NewPolicy()
-	interceptor := unaryRBACInterceptor(policy)
+	interceptor := unaryRBACInterceptor(policy, nil)
 
 	// Bare certificate with no extensions.
 	cert := &x509.Certificate{}
@@ -191,7 +191,7 @@ func TestUnaryRBACInterceptor_CertMissingRoleExtension(t *testing.T) {
 
 func TestUnaryRBACInterceptor_OperatorCanAccessReaderMethods(t *testing.T) {
 	policy := rbac.NewPolicy()
-	interceptor := unaryRBACInterceptor(policy)
+	interceptor := unaryRBACInterceptor(policy, nil)
 	cert := signDeviceCert(t, "operator")
 	ctx := peerCtx(t, cert)
 
@@ -217,7 +217,7 @@ func TestUnaryRBACInterceptor_OperatorCanAccessReaderMethods(t *testing.T) {
 
 func TestUnaryRBACInterceptor_OperatorDeniedAdminMethods(t *testing.T) {
 	policy := rbac.NewPolicy()
-	interceptor := unaryRBACInterceptor(policy)
+	interceptor := unaryRBACInterceptor(policy, nil)
 	cert := signDeviceCert(t, "operator")
 	ctx := peerCtx(t, cert)
 

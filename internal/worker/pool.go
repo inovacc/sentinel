@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/inovacc/sentinel/internal/audit"
 	"github.com/inovacc/sentinel/internal/confine"
 	"github.com/inovacc/sentinel/internal/sandbox"
 )
@@ -71,6 +72,9 @@ func WithLogger(l *slog.Logger) Option { return func(p *Pool) { p.logger = l } }
 // WithConfiner sets the OS process confiner.
 func WithConfiner(c confine.Confiner) Option { return func(p *Pool) { p.confiner = c } }
 
+// WithAuditLogger sets the security audit logger.
+func WithAuditLogger(l audit.Logger) Option { return func(p *Pool) { p.auditLog = l } }
+
 // Pool manages worker processes.
 type Pool struct {
 	mu           sync.RWMutex
@@ -81,6 +85,7 @@ type Pool struct {
 	staleTimeout time.Duration
 	logger       *slog.Logger
 	confiner     confine.Confiner
+	auditLog     audit.Logger
 	warnOnce     sync.Once // guards the one-time "running unconfined" warning
 	cancel       context.CancelFunc
 	done         chan struct{}
@@ -106,6 +111,10 @@ func NewPool(db *sql.DB, sb *sandbox.Sandbox, opts ...Option) (*Pool, error) {
 	}
 	for _, o := range opts {
 		o(p)
+	}
+
+	if p.auditLog == nil {
+		p.auditLog = audit.NopLogger{}
 	}
 
 	if err := p.migrate(); err != nil {
@@ -196,6 +205,14 @@ func (p *Pool) Spawn(ctx context.Context, command string, args []string, workDir
 			// and before go p.monitor (the only place cmd.Wait runs), so
 			// confinement enforcement owns cleanup of the process it refused.
 			_, _ = cmd.Process.Wait()
+			if aerr := p.auditLog.Record(ctx, audit.Event{
+				Type:    audit.EventConfineRefuse,
+				Outcome: audit.OutcomeDeny,
+				Target:  command,
+				Detail:  map[string]any{"command": command, "reason": "unconfined worker refused"},
+			}); aerr != nil {
+				return nil, fmt.Errorf("worker: refusing unconfined process (audit failed: %v): %w", aerr, cErr)
+			}
 			return nil, fmt.Errorf("worker: refusing unconfined process: %w", cErr)
 		}
 	}

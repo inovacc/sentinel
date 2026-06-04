@@ -7,6 +7,7 @@ import (
 	"net"
 
 	v1 "github.com/inovacc/sentinel/internal/api/v1"
+	"github.com/inovacc/sentinel/internal/audit"
 	"github.com/inovacc/sentinel/internal/rbac"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -53,7 +54,11 @@ type Server struct {
 // certPEM/keyPEM are the server's TLS certificate and key.
 // caCertPEM is the CA certificate used to verify client certificates.
 // The RBAC unary and stream interceptors are registered using the given policy.
-func NewServer(certPEM, keyPEM, caCertPEM []byte, policy *rbac.Policy, opts ...Option) (*Server, error) {
+// auditLogger is the security audit logger; nil defaults to audit.NopLogger{}.
+func NewServer(certPEM, keyPEM, caCertPEM []byte, policy *rbac.Policy, auditLogger audit.Logger, opts ...Option) (*Server, error) {
+	if auditLogger == nil {
+		auditLogger = audit.NopLogger{}
+	}
 	cert, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
 		return nil, fmt.Errorf("grpc: load server keypair: %w", err)
@@ -78,11 +83,11 @@ func NewServer(certPEM, keyPEM, caCertPEM []byte, policy *rbac.Policy, opts ...O
 
 	// Build interceptor chains: RBAC first, then any extras.
 	unaryChain := append(
-		[]grpc.UnaryServerInterceptor{unaryRBACInterceptor(policy)},
+		[]grpc.UnaryServerInterceptor{unaryRBACInterceptor(policy, auditLogger)},
 		cfg.extraUnaryInterceptors...,
 	)
 	streamChain := append(
-		[]grpc.StreamServerInterceptor{streamRBACInterceptor(policy)},
+		[]grpc.StreamServerInterceptor{streamRBACInterceptor(policy, auditLogger)},
 		cfg.extraStreamInterceptors...,
 	)
 

@@ -38,7 +38,7 @@ func startTestServer(t *testing.T, clientRole string) (addr string, cliCert, cli
 		t.Fatalf("sign client: %v", err)
 	}
 
-	srv, err := NewServer(srvCert, srvKey, caPEM, rbac.NewPolicy())
+	srv, err := NewServer(srvCert, srvKey, caPEM, rbac.NewPolicy(), nil)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}

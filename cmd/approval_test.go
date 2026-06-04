@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/inovacc/sentinel/internal/audit"
 	"github.com/inovacc/sentinel/internal/fleet"
 
 	_ "modernc.org/sqlite"
@@ -29,7 +30,7 @@ func newTestRegistry(t *testing.T) *fleet.Registry {
 // a new peer is rejected and recorded pending; after approval it is signed.
 func TestBuildOnPeerAcceptedManualApproval(t *testing.T) {
 	reg := newTestRegistry(t)
-	fn := buildOnPeerAccepted(slog.Default(), reg, false /* autoAccept */)
+	fn := buildOnPeerAccepted(slog.Default(), reg, audit.NopLogger{}, false /* autoAccept */)
 
 	ok, err := fn("DEV-PEER-1", []byte("cert"), "operator")
 	if ok || err == nil || !strings.Contains(err.Error(), "pending") {
@@ -51,7 +52,7 @@ func TestBuildOnPeerAcceptedManualApproval(t *testing.T) {
 
 func TestBuildOnPeerAcceptedAutoAccept(t *testing.T) {
 	reg := newTestRegistry(t)
-	fn := buildOnPeerAccepted(slog.Default(), reg, true /* autoAccept */)
+	fn := buildOnPeerAccepted(slog.Default(), reg, audit.NopLogger{}, true /* autoAccept */)
 	if ok, err := fn("DEV-X", []byte("c"), "operator"); !ok || err != nil {
 		t.Fatalf("auto-accept: (ok=%v, err=%v), want (true, nil)", ok, err)
 	}
