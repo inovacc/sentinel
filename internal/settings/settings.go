@@ -10,7 +10,7 @@ import (
 
 // CurrentConfigVersion is the schema version written by this build. Bump it
 // whenever the config layout changes and add a step to Config.Migrate.
-const CurrentConfigVersion = 2
+const CurrentConfigVersion = 3
 
 // Config holds all sentinel configuration.
 type Config struct {
@@ -25,6 +25,7 @@ type Config struct {
 	Logging   LoggingConfig   `yaml:"logging"`
 	Discovery DiscoveryConfig `yaml:"discovery"`
 	Confine   ConfineConfig   `yaml:"confine"`
+	Audit     AuditConfig     `yaml:"audit"`
 }
 
 type DeviceConfig struct {
@@ -105,6 +106,25 @@ type ConfineConfig struct {
 	MaxProcesses uint32 `yaml:"max_processes"`
 }
 
+// AuditConfig controls the security audit log (Phase 3.1).
+type AuditConfig struct {
+	Enabled       bool   `yaml:"enabled"`
+	DBPath        string `yaml:"db_path"`        // empty = datadir default (audit.db)
+	RetentionDays int    `yaml:"retention_days"` // 0 = keep forever
+	SegmentMax    int    `yaml:"segment_max"`    // records per segment before seal
+}
+
+// defaultAuditConfig is the single source of truth for audit defaults, shared by
+// DefaultConfig so the two cannot drift.
+func defaultAuditConfig() AuditConfig {
+	return AuditConfig{
+		Enabled:       true,
+		DBPath:        "",
+		RetentionDays: 90,
+		SegmentMax:    10000,
+	}
+}
+
 // defaultConfineConfig returns the built-in confinement defaults. It is the
 // single source of truth shared by DefaultConfig and Migrate so the two cannot
 // drift when defaults change.
@@ -164,6 +184,7 @@ func DefaultConfig() *Config {
 			WindowSeconds: 300,
 		},
 		Confine: defaultConfineConfig(),
+		Audit:   defaultAuditConfig(),
 	}
 }
 
@@ -192,6 +213,13 @@ func (c *Config) Validate() error {
 	// Check confine CPU percentage is within range.
 	if c.Confine.CPUPercent > 100 {
 		return fmt.Errorf("confine.cpu_percent must be 0..100, got %d", c.Confine.CPUPercent)
+	}
+	// Check audit retention and segment bounds.
+	if c.Audit.RetentionDays < 0 {
+		return fmt.Errorf("audit.retention_days must be >= 0, got %d", c.Audit.RetentionDays)
+	}
+	if c.Audit.SegmentMax < 1 {
+		return fmt.Errorf("audit.segment_max must be >= 1, got %d", c.Audit.SegmentMax)
 	}
 	return nil
 }
