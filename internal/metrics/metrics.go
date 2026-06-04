@@ -5,8 +5,28 @@ import (
 	"encoding/json"
 	"net/http"
 	"runtime"
+	"sync/atomic"
 	"time"
 )
+
+// limitExceededCounter accumulates DoS-limit breaches across all layers. It is a
+// process-global atomic so any package (transport, grpc, confine) can bump it
+// without holding a handler reference. It is surfaced in the /metrics JSON.
+var limitExceededCounter atomic.Uint64
+
+// IncLimitExceeded records one resource-limit breach of the given kind. kind is
+// reserved for future per-kind breakdown; today it only increments the total.
+func IncLimitExceeded(kind string) {
+	_ = kind
+	limitExceededCounter.Add(1)
+}
+
+// limitExceededTotal returns the current breach count (used by the handler and
+// tests).
+func limitExceededTotal() uint64 { return limitExceededCounter.Load() }
+
+// LimitExceededTotalForTest exposes the breach counter to other packages' tests.
+func LimitExceededTotalForTest() uint64 { return limitExceededTotal() }
 
 // WorkerPoolStats is the interface the metrics handler uses to query the
 // worker pool. Any type that exposes ActiveCount and TotalCount satisfies it.
@@ -26,8 +46,9 @@ type metricsResponse struct {
 	GoVersion     string  `json:"go_version"`
 	Goroutines    int     `json:"goroutines"`
 	MemoryAllocMB float64 `json:"memory_alloc_mb"`
-	WorkersActive int     `json:"workers_active"`
-	WorkersTotal  int     `json:"workers_total"`
+	WorkersActive      int    `json:"workers_active"`
+	WorkersTotal       int    `json:"workers_total"`
+	LimitExceededTotal uint64 `json:"limit_exceeded_total"`
 }
 
 // NewHandler creates a Handler that reports uptime from startTime and worker
@@ -56,6 +77,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 		resp.WorkersActive = h.workerPool.ActiveCount()
 		resp.WorkersTotal = h.workerPool.TotalCount()
 	}
+
+	resp.LimitExceededTotal = limitExceededTotal()
 
 	w.Header().Set("Content-Type", "application/json")
 	enc := json.NewEncoder(w)

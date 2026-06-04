@@ -22,6 +22,7 @@ const (
 	EventDaemonRenew         = "daemon.renew"
 	EventFSRead              = "fs.read"
 	EventAuditPrune          = "audit.prune"
+	EventLimitExceeded       = "limit.exceeded"
 )
 
 // catalog maps every known event type to its static criticality. This is the
@@ -48,6 +49,7 @@ var catalog = map[string]Criticality{
 	EventDaemonRenew:         Critical,
 	EventFSRead:              Routine,
 	EventAuditPrune:          Routine,
+	EventLimitExceeded:       Routine,
 }
 
 // CriticalityOf returns the static criticality for an event type. ok is false
