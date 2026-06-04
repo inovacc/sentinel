@@ -207,6 +207,16 @@ func buildDaemon(ctx context.Context) (*daemon, error) {
 	logger.Info("device identity loaded", "device_id", deviceID)
 	warnCertExpiry(logger, certPEM)
 
+	// Determine the daemon's own role from the device cert; fall back to admin.
+	selfRole := ca.RoleAdmin
+	if block, _ := pem.Decode(certPEM); block != nil {
+		if parsed, perr := x509.ParseCertificate(block.Bytes); perr == nil {
+			if r, rerr := ca.ExtractRole(parsed); rerr == nil {
+				selfRole = r
+			}
+		}
+	}
+
 	d.grpcAddr = orDefault(cfg.Listen.GRPC, ":7400")
 	d.bootstrapAddr = orDefault(cfg.Listen.Bootstrap, ":7399")
 	d.metricsAddr = orDefault(cfg.Listen.Metrics, ":7401")
@@ -261,6 +271,25 @@ func buildDaemon(ctx context.Context) (*daemon, error) {
 		Target:  d.deviceID,
 		Detail:  map[string]any{"device_id": d.deviceID},
 	})
+
+	// Run own-cert renewal once at startup, then every 6 h in the background.
+	if _, rerr := renewSelfIfNeeded(authority, certDir, selfRole, cfg.Crypto, auditLog, logger); rerr != nil {
+		logger.Warn("own-cert startup renewal check failed", "err", rerr)
+	}
+	go func() {
+		ticker := time.NewTicker(6 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if _, rerr := renewSelfIfNeeded(authority, certDir, selfRole, cfg.Crypto, auditLog, logger); rerr != nil {
+					logger.Warn("own-cert auto-renew failed", "err", rerr)
+				}
+			}
+		}
+	}()
 
 	d.workerPool, err = worker.NewPool(db, sb, worker.WithLogger(logger), worker.WithConfiner(confiner), worker.WithAuditLogger(auditLog))
 	if err != nil {
@@ -817,6 +846,52 @@ func parseLogLevel(level string) slog.Level {
 	default:
 		return slog.LevelInfo
 	}
+}
+
+// needsAutoRenew reports whether the cert's remaining life is below threshold.
+func needsAutoRenew(cert *x509.Certificate, threshold time.Duration) bool {
+	return time.Until(cert.NotAfter) < threshold
+}
+
+// renewSelfIfNeeded re-signs this node's own device cert in place when it is
+// within RenewThreshold of expiry, using the local CA (no peer interaction). It
+// emits cert.autorenew (routine) and returns true when a renewal happened.
+func renewSelfIfNeeded(authority *ca.CA, certDir string, role string, cfg settings.CryptoConfig, auditLog audit.Logger, logger *slog.Logger) (bool, error) {
+	certPath := filepath.Join(certDir, "device.crt")
+	keyPath := filepath.Join(certDir, "device.key")
+	certPEM, err := os.ReadFile(certPath)
+	if err != nil {
+		return false, fmt.Errorf("autorenew: read device cert: %w", err)
+	}
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		return false, fmt.Errorf("autorenew: device cert unreadable")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return false, fmt.Errorf("autorenew: parse device cert: %w", err)
+	}
+	if !needsAutoRenew(cert, cfg.RenewThreshold) {
+		return false, nil
+	}
+	newCert, newKey, err := authority.ReSignSelf(role, cfg.CertValidity)
+	if err != nil {
+		return false, fmt.Errorf("autorenew: re-sign: %w", err)
+	}
+	if err := os.WriteFile(keyPath, newKey, 0o600); err != nil {
+		return false, fmt.Errorf("autorenew: write key: %w", err)
+	}
+	if err := os.WriteFile(certPath, newCert, 0o644); err != nil {
+		return false, fmt.Errorf("autorenew: write cert: %w", err)
+	}
+	_ = auditLog.Record(context.Background(), audit.Event{
+		Type:    audit.EventCertAutorenew,
+		Outcome: audit.OutcomeAllow,
+		Target:  "self",
+		Detail:  map[string]any{"valid_for_hours": int(cfg.CertValidity.Hours())},
+	})
+	logger.Info("auto-renewed own device certificate", "valid_until", time.Now().Add(cfg.CertValidity).Format("2006-01-02"))
+	return true, nil
 }
 
 // buildAuditLogger constructs the security audit logger from config. A disabled
