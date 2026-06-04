@@ -15,6 +15,10 @@ type MTLSConfig struct {
 	KeyPEM []byte
 	// CACertPEM is the CA certificate for verifying peers.
 	CACertPEM []byte
+	// VerifyPeer, when non-nil, is called during the mTLS handshake with the
+	// peer's verified leaf certificate. Returning an error rejects the handshake
+	// (used for local revocation, T8.4). It runs AFTER chain verification.
+	VerifyPeer func(leaf *x509.Certificate) error
 }
 
 // MTLSDialer creates outbound mTLS connections to peers.
@@ -98,12 +102,26 @@ func NewMTLSServerConfig(cfg MTLSConfig) (*tls.Config, error) {
 		return nil, fmt.Errorf("mtls: failed to parse CA certificate")
 	}
 
-	return &tls.Config{
+	tlsCfg := &tls.Config{
 		Certificates: []tls.Certificate{cert},
 		ClientAuth:   tls.RequireAndVerifyClientCert,
 		ClientCAs:    caPool,
 		MinVersion:   tls.VersionTLS13,
-	}, nil
+	}
+	if cfg.VerifyPeer != nil {
+		verify := cfg.VerifyPeer
+		tlsCfg.VerifyPeerCertificate = func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+			if len(rawCerts) == 0 {
+				return fmt.Errorf("mtls: no peer certificate")
+			}
+			leaf, err := x509.ParseCertificate(rawCerts[0])
+			if err != nil {
+				return fmt.Errorf("mtls: parse peer cert: %w", err)
+			}
+			return verify(leaf)
+		}
+	}
+	return tlsCfg, nil
 }
 
 // NewMTLSListener creates a TLS listener that requires client certificates.
