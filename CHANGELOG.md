@@ -11,6 +11,8 @@ this changelog (≤ `v1.1.0`) are documented there via auto-generated release no
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-06-04
+
 A security-hardening campaign closing field-driven and threat-model gaps. See
 `docs/security/THREAT-MODEL.md` and `docs/superpowers/HARDENING-STATUS.md` for the
 full traceability.
