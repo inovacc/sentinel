@@ -23,6 +23,11 @@ const (
 	EventFSRead              = "fs.read"
 	EventAuditPrune          = "audit.prune"
 	EventLimitExceeded       = "limit.exceeded"
+	EventDeviceRevoked       = "device.revoked"
+	EventDeviceUnrevoked     = "device.unrevoked"
+	EventCAKeySealed         = "cakey.sealed"
+	EventCAKeyUnsealFail     = "cakey.unseal_failed"
+	EventCertAutorenew       = "cert.autorenew"
 )
 
 // catalog maps every known event type to its static criticality. This is the
@@ -50,6 +55,11 @@ var catalog = map[string]Criticality{
 	EventFSRead:              Routine,
 	EventAuditPrune:          Routine,
 	EventLimitExceeded:       Routine,
+	EventDeviceRevoked:       Critical,
+	EventDeviceUnrevoked:     Critical,
+	EventCAKeySealed:         Critical,
+	EventCAKeyUnsealFail:     Critical,
+	EventCertAutorenew:       Routine,
 }
 
 // CriticalityOf returns the static criticality for an event type. ok is false

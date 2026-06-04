@@ -42,6 +42,11 @@ func TestTierMatchesSpec(t *testing.T) {
 		{EventDaemonRenew, Critical},
 		{EventFSRead, Routine},
 		{EventAuditPrune, Routine},
+		{EventDeviceRevoked, Critical},
+		{EventDeviceUnrevoked, Critical},
+		{EventCAKeySealed, Critical},
+		{EventCAKeyUnsealFail, Critical},
+		{EventCertAutorenew, Routine},
 	}
 	for _, tt := range tests {
 		got, ok := CriticalityOf(tt.eventType)
