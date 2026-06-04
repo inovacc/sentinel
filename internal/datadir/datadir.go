@@ -61,6 +61,9 @@ func DBPath() string {
 	return filepath.Join(Root(), "sentinel.db")
 }
 
+// AuditDBPath returns the default path to the security audit database.
+func AuditDBPath() string { return filepath.Join(Root(), "audit.db") }
+
 // ConfigPath returns the default config file path.
 func ConfigPath() string {
 	return filepath.Join(Root(), "config.yaml")

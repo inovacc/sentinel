@@ -65,5 +65,6 @@ func init() {
 		newRenewCmd(),
 		newDoctorCmd(),
 		newVersionCmd(),
+		newAuditCmd(),
 	)
 }
