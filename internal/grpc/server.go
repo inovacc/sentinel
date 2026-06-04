@@ -43,6 +43,24 @@ func WithServerOption(o grpc.ServerOption) Option {
 	}
 }
 
+// WithMaxRecvMsgSize caps the size in bytes of a single inbound request message.
+// Oversized messages are rejected by gRPC with codes.ResourceExhausted. This
+// bounds inbound messages only — outbound responses (e.g. screenshots) are not
+// capped, so large captures keep working.
+func WithMaxRecvMsgSize(n int) Option {
+	return func(c *serverConfig) {
+		c.grpcOpts = append(c.grpcOpts, grpc.MaxRecvMsgSize(n))
+	}
+}
+
+// WithMaxConcurrentStreams bounds the number of concurrent streams a single
+// connection may open, limiting per-connection multiplexing abuse.
+func WithMaxConcurrentStreams(n uint32) Option {
+	return func(c *serverConfig) {
+		c.grpcOpts = append(c.grpcOpts, grpc.MaxConcurrentStreams(n))
+	}
+}
+
 // Server wraps a gRPC server with mTLS and interceptors.
 type Server struct {
 	grpcServer *grpc.Server
