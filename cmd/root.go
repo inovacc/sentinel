@@ -66,5 +66,6 @@ func init() {
 		newDoctorCmd(),
 		newVersionCmd(),
 		newAuditCmd(),
+		newConfinedExecCmd(),
 	)
 }

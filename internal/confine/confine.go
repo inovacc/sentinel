@@ -14,6 +14,10 @@ type Config struct {
 	MaxMemoryMB  uint64
 	CPUPercent   uint32
 	MaxProcesses uint32
+	// Unix rlimits (T5.3). 0 means "unlimited — leave the OS default".
+	ProcMaxMemoryBytes uint64 // RLIMIT_AS
+	ProcMaxOpenFiles   uint64 // RLIMIT_NOFILE
+	ProcMaxCPUSeconds  uint64 // RLIMIT_CPU
 }
 
 // DefaultConfig returns conservative-but-workable confinement limits.
